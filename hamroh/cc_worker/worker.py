@@ -493,7 +493,7 @@ class CcWorker(CcEventHandlerMixin):
 
         Event-driven: writes a fresh user envelope directly to CC's stdin
         and returns as soon as the OS accepts the bytes (typically
-        microseconds). No polling, no queue in the hot path — claudir's
+        microseconds). No polling and no queue in the direct hot path; the
         1s inject poll doesn't apply here. CC reads stdin at message
         boundaries, so the inject lands at the next reasoning step.
 

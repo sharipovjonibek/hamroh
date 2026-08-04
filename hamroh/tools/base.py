@@ -39,7 +39,7 @@ class Heartbeat:
     """Liveness atomic the MCP server bumps on every tool invocation.
 
     The CC worker reads ``last_activity`` to decide whether the subprocess is
-    actually wedged or just busy inside a long MCP call (see Claudir Part 3).
+    actually wedged or just busy inside a long MCP call.
     """
 
     __slots__ = ("_last",)

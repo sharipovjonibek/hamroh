@@ -31,14 +31,22 @@ services:
 
   hamroh:
     build: .
+    image: hamroh-agent:local
     restart: on-failure
     env_file: .env
+    environment:
+      # Dedicated Codex identity for this bot. Authenticate it once with the
+      # login helper; never expose the operator's general ~/.codex directory.
+      CODEX_HOME: /var/lib/codex
     depends_on:
       hamroh-init:
         condition: service_completed_successfully
     volumes:
-      # Persistent data: SQLite, session_id, cc_logs
+      # Persistent data: SQLite, thread id, runtime logs
       - ./data:/app/data
+      # ChatGPT/Codex OAuth cache. Kept separate from both source and the
+      # operator's personal Codex history/config.
+      - codex-home:/var/lib/codex
       # Memory files. Bind-mounted so runtime writes land in the git-tracked
       # host checkout — durable across redeploys and committable.
       - ./memories:/app/memories
@@ -53,12 +61,6 @@ services:
       # rebuild. The image also has a copy baked in (Dockerfile); this
       # overlays it.
       - ./skills:/app/skills
-      # Claude Code session files, so conversations resume across restarts.
-      # Auth is NOT taken from here — it comes from CLAUDE_CODE_OAUTH_TOKEN
-      # in .env (see .env.example). The env-var token takes precedence over
-      # any mounted credentials, so this works the same on Linux/macOS/Windows.
-      - ~/.claude:/root/.claude
-      - ~/.claude.json:/root/.claude.json
       # Access policy — single-file bind mount so /allow, /deny, /dmpolicy
       # mutations from Telegram persist across restarts. The hamroh-init
       # sidecar above guarantees the host file exists before this mount is
@@ -71,5 +73,20 @@ services:
       # at boot. Read-only; host edits apply on restart. hamroh-init seeds it.
       - ./default-reminders.json:/app/default-reminders.json:ro
     working_dir: /app
-    # Graceful shutdown: give CC subprocess time to save state
+    # Graceful shutdown: let the Codex runtime persist its thread state.
     stop_grace_period: 15s
+
+  codex-auth:
+    image: hamroh-agent:local
+    profiles: ["auth"]
+    # Browser OAuth returns to localhost:1455 on the Linux host.
+    network_mode: host
+    environment:
+      CODEX_HOME: /var/lib/codex
+    volumes:
+      - codex-home:/var/lib/codex
+    working_dir: /app
+    command: ["python", "-m", "hamroh.codex_login"]
+
+volumes:
+  codex-home:

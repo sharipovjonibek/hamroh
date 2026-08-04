@@ -411,9 +411,9 @@ def test_one_mcp_skipped_others_still_load(tmp_path: Path) -> None:
 
 def test_skills_disabled_parsed(tmp_path: Path) -> None:
     p = tmp_path / "plugins.json"
-    p.write_text(json.dumps({"skills_disabled": ["render-style", "demo"]}))
+    p.write_text(json.dumps({"skills_disabled": ["example-skill", "demo"]}))
     plugins = load_plugins(p)
-    assert plugins.skills_disabled == frozenset({"render-style", "demo"})
+    assert plugins.skills_disabled == frozenset({"example-skill", "demo"})
 
 
 def test_skills_disabled_filters_skills_store(tmp_path: Path) -> None:

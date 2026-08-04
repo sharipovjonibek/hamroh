@@ -1,4 +1,4 @@
-"""JSON Schema enforced on Claude Code's structured output."""
+"""Provider-neutral JSON Schema enforced on each model turn's output."""
 
 from __future__ import annotations
 
@@ -10,12 +10,11 @@ import json
 #: burn 100+ tokens — cheap per turn, expensive over a long session.
 REASON_MAX_LENGTH = 100
 
-#: The Anthropic API's tool ``input_schema`` rejects top-level ``oneOf``,
-#: ``allOf``, and ``anyOf`` (and likely ``if``/``then``). That means we
-#: can't express "reason is required only on stop" in the schema itself
-#: — this must stay a flat object. The "required on stop" invariant is
-#: instead enforced client-side by :class:`~hamroh.models.ControlAction`'s
-#: ``@model_validator`` when the stream-json event is parsed.
+#: Keep this a flat object: the legacy Anthropic tool schema rejects top-level
+#: conditionals, while OpenAI strict structured outputs require every property
+#: to appear in ``required``. Nullable fields preserve the semantic optionality;
+#: the "non-empty reason on stop/skip" invariant is still enforced client-side
+#: by :class:`~hamroh.models.ControlAction`.
 CONTROL_ACTION_SCHEMA: dict = {
     "type": "object",
     "properties": {
@@ -31,12 +30,12 @@ CONTROL_ACTION_SCHEMA: dict = {
             ),
         },
         "reason": {
-            "type": "string",
+            "type": ["string", "null"],
             "maxLength": REASON_MAX_LENGTH,
             "description": (
                 "Terse justification (≤10 words). "
                 "REQUIRED non-empty when action is 'stop' or 'skip'. "
-                "Optional (may be omitted) when action is 'sleep' or 'heartbeat'."
+                "Use null when action is 'sleep' or 'heartbeat' and no reason is needed."
             ),
         },
         "sleep_ms": {
@@ -44,7 +43,7 @@ CONTROL_ACTION_SCHEMA: dict = {
             "description": "Only used when action == 'sleep'.",
         },
     },
-    "required": ["action"],
+    "required": ["action", "reason", "sleep_ms"],
     "additionalProperties": False,
 }
 

@@ -15,14 +15,16 @@ import logging
 import os
 import signal
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import IO
+from typing import IO, TypeAlias
 
 from .access import AccessConfig, load_access, save_access
 from .cc_worker.cc_schema import schema_json
 from .cc_worker import CcSpawnSpec, CcWorker
+from .codex_worker import CodexSpawnSpec, CodexWorker
 from .config import Config
 from .db.database import Database
 from .db.messages import ToolCall, fetch_unconsumed_inbound, insert_tool_call
@@ -31,7 +33,6 @@ from .db.reminders import (
     cancel_auto_seeded,
     insert_auto_seeded_reminder,
     pending_committed_keys,
-    pending_with_auto_seed_key,
     reset_stuck_reminders,
 )
 from .engine import Engine, EngineOptions, ErrorNotify, TypingAction
@@ -59,73 +60,8 @@ from .utils.telegram_links import format_message_refs
 # the module split.
 log = logging.getLogger("hamroh")
 
-
-_SELF_REFLECTION_KEY = "self-reflection-default"
-
-
-async def _seed_default_reminders(db, config) -> None:
-    """Reconcile the default self-reflection reminder with the config flag.
-
-    The self-reflection loop is controlled by ``HAMROH_SELF_REFLECTION_ENABLED``
-    (on by default). This is an operator-only switch read from the
-    environment — the bot can't reach it, and while the loop is on the
-    agent can't cancel it (see ``CancelReminderTool``).
-
-    Off: cancel any pending auto-seeded row so it stops firing, then return.
-    On: ensure a PENDING row with ``auto_seed_key='self-reflection-default'``
-    exists. If it's missing (cancelled, deleted, whatever the reason) we
-    re-seed it — defense in depth against DB tampering while enabled.
-    """
-    if not config.self_reflection_enabled:
-        cancelled = await cancel_auto_seeded(db, _SELF_REFLECTION_KEY)
-        log.info(
-            "self-reflection disabled; cancelled %d pending reminder(s)",
-            cancelled,
-        )
-        return
-    await _ensure_self_reflection_seeded(db, config)
-
-
-async def _ensure_self_reflection_seeded(db, config) -> None:
-    """Seed the self-reflection reminder unless a pending row already exists."""
-    existing = await pending_with_auto_seed_key(db, _SELF_REFLECTION_KEY)
-    if existing > 0:
-        log.info(
-            "self-reflection reminder: %d pending row(s) active, skipping seed",
-            existing,
-        )
-        return
-
-    cron_expr = config.self_reflection_cron
-    # Compute the first trigger time from the cron expression if croniter
-    # is available; otherwise default to "now" so the reminder loop will
-    # pick it up immediately.
-    first_trigger = datetime.now(timezone.utc)
-    try:
-        from croniter import croniter
-
-        first_trigger = croniter(cron_expr, first_trigger).get_next(datetime)
-    except ImportError:  # pragma: no cover
-        log.warning(
-            "croniter not installed, self-reflection reminder set to trigger now"
-        )
-
-    await insert_auto_seeded_reminder(
-        db,
-        NewReminder(
-            chat_id=config.owner_id,
-            user_id=-1,  # synthetic pseudo-user (same convention as reminder loop)
-            text='<skill name="self-reflection">run</skill>',
-            trigger_at=first_trigger.strftime("%Y-%m-%d %H:%M:%S"),
-            cron_expr=cron_expr,
-        ),
-        _SELF_REFLECTION_KEY,
-    )
-    log.info(
-        "seeded default self-reflection reminder (cron=%s, next=%s UTC)",
-        cron_expr,
-        first_trigger.strftime("%Y-%m-%d %H:%M:%S"),
-    )
+Worker: TypeAlias = CcWorker | CodexWorker
+WorkerSpec: TypeAlias = CcSpawnSpec | CodexSpawnSpec
 
 
 def _next_cron_trigger(cron_expr: str) -> str:
@@ -143,8 +79,8 @@ async def _reconcile_committed_reminders(db, config) -> None:
     committed rows whose key is no longer declared (entry edited, removed, or
     turned off with ``"enabled": false``). A content edit shifts the key, so it
     reads as cancel-old + seed-new. A disabled reminder is simply left out of
-    the desired set, so it cancels like a removed one. Rows from other sources —
-    self-reflection, user-created — are never touched.
+    the desired set, so it cancels like a removed one. User-created rows are
+    never touched.
     """
     declared = load_declared_reminders(config.committed_reminders_path)
     desired: dict[str, NewReminder] = {}
@@ -154,7 +90,7 @@ async def _reconcile_committed_reminders(db, config) -> None:
         key = committed_key(reminder, config.owner_id)
         desired[key] = NewReminder(
             chat_id=resolve_chat(reminder, config.owner_id),
-            user_id=-1,  # synthetic pseudo-user, same convention as self-reflection
+            user_id=-1,  # synthetic pseudo-user for operator-declared reminders
             text=reminder.text,
             trigger_at=_next_cron_trigger(reminder.cron_expr),
             cron_expr=reminder.cron_expr,
@@ -284,28 +220,31 @@ def _build_external_mcp_config(
 
 
 def _load_session_id(config: Config) -> str | None:
-    """Resume the prior CC session if one was persisted on a clean shutdown."""
+    """Resume the prior provider session if one was persisted."""
     if not config.session_id_path.exists():
         return None
     session_id = config.session_id_path.read_text().strip() or None
     if session_id:
-        log.info("resuming cc session %s", session_id)
+        log.info("resuming %s session %s", config.provider, session_id)
     return session_id
 
 
 def _install_signal_handlers(
-    worker: CcWorker,
+    worker: Worker,
     stop_event: asyncio.Event,
 ) -> None:
-    """Wire SIGINT/SIGTERM to the same stop path. Tells the cc supervisor
-    we're shutting down BEFORE it observes the subprocess exit (the SIGINT
-    propagates to the same process group, so cc is exiting in parallel).
-    Without this the supervisor treats the clean exit as a crash and
-    respawns."""
+    """Wire SIGINT/SIGTERM to the provider's clean shutdown path."""
 
     def _stop(*_a) -> None:
         log.info("signal received, shutting down")
-        worker._stop_supervisor.set()
+        # A terminal SIGINT reaches subprocesses in the same process group.
+        # Arm the provider-specific stop event first so neither supervisor
+        # mistakes that expected exit for a crash and respawns it.
+        provider_stop = getattr(worker, "_stop_supervisor", None)
+        if provider_stop is None:
+            provider_stop = getattr(worker, "_stop_requested", None)
+        if provider_stop is not None:
+            provider_stop.set()
         stop_event.set()
 
     loop = asyncio.get_running_loop()
@@ -324,7 +263,7 @@ class _App:
     config: Config
     db: Database
     mcp: McpServer | None = None
-    worker: CcWorker | None = None
+    worker: Worker | None = None
     dispatcher: TelegramDispatcher | None = None
     engine: Engine | None = None
     reminder_task: asyncio.Task | None = None
@@ -401,7 +340,6 @@ async def _open_db_and_stores(config: Config) -> tuple[Database, Plugins, _Store
             "re-armed %d reminder(s) left mid-delivery by the last shutdown",
             re_armed,
         )
-    await _seed_default_reminders(db, config)
     await _reconcile_committed_reminders(db, config)
     return db, plugins, stores
 
@@ -482,6 +420,138 @@ def _build_cc_spec(
     )
 
 
+def _codex_plugin_tools(plugin) -> list[str] | None:
+    """Translate Claude-style MCP allow entries to Codex bare tool names.
+
+    ``mcp__server`` means every tool and therefore returns ``None`` (omit
+    Codex's ``enabled_tools`` key). Exact ``mcp__server__tool`` entries turn
+    into ``tool``. Rejecting a mismatched namespace keeps an operator typo
+    from silently exposing more of a server than intended.
+    """
+
+    server_prefix = f"mcp__{plugin.name}"
+    if server_prefix in plugin.allowed_tools:
+        return None
+    exact_prefix = server_prefix + "__"
+    tools: list[str] = []
+    for entry in plugin.allowed_tools:
+        if not entry.startswith(exact_prefix) or not entry[len(exact_prefix) :]:
+            raise ValueError(
+                f"MCP {plugin.name!r} has invalid allowed tool {entry!r}; "
+                f"expected {server_prefix!r} or {exact_prefix + '<tool>'!r}"
+            )
+        tools.append(entry[len(exact_prefix) :])
+    return sorted(set(tools))
+
+
+def _build_codex_config(plugins: Plugins, mcp: McpServer) -> dict:
+    """Build an isolated Codex config from Hamroh's explicit plugin policy."""
+
+    hamroh_tools = sorted(tool.name for tool in mcp.tools)
+    servers: dict[str, dict] = {
+        "hamroh": {
+            "url": mcp.url,
+            "enabled": True,
+            "required": True,
+            "enabled_tools": hamroh_tools,
+            # There is no interactive terminal in Telegram turns. These tools
+            # were already selected by Hamroh's own allowlist and rails.
+            "default_tools_approval_mode": "approve",
+            "startup_timeout_sec": 20,
+            "tool_timeout_sec": 120,
+        }
+    }
+
+    for plugin in plugins.mcps:
+        entry: dict = {
+            "enabled": True,
+            "required": False,
+            "default_tools_approval_mode": "approve",
+        }
+        if plugin.type == "stdio":
+            entry.update(
+                {
+                    "command": plugin.command,
+                    "args": list(plugin.args),
+                    "env": dict(plugin.env),
+                }
+            )
+        else:
+            entry["url"] = plugin.url
+            if plugin.headers:
+                entry["http_headers"] = dict(plugin.headers)
+            if plugin.type == "sse":
+                log.warning(
+                    "MCP %s uses legacy SSE; Codex will try the URL as remote HTTP",
+                    plugin.name,
+                )
+        enabled_tools = _codex_plugin_tools(plugin)
+        if enabled_tools is not None:
+            entry["enabled_tools"] = enabled_tools
+        servers[plugin.name] = entry
+
+    shell_enabled = bool(
+        plugins.tool_groups.get("bash", False)
+        or plugins.tool_groups.get("code", False)
+    )
+    return {
+        "features": {
+            "shell_tool": shell_enabled,
+            "unified_exec": shell_enabled,
+            "shell_snapshot": False,
+            "multi_agent": bool(plugins.tool_groups.get("subagents", False)),
+            # Hamroh supplies its own explicit capabilities and persistence.
+            "apps": False,
+            "remote_plugin": False,
+            "hooks": False,
+            "goals": False,
+            "memories": False,
+            "personality": False,
+        },
+        # Matches Hamroh's former fresh WebSearch capability. Command network
+        # access remains governed separately by the Codex sandbox.
+        "web_search": "live",
+        "mcp_servers": servers,
+    }
+
+
+def _build_codex_spec(
+    config: Config, plugins: Plugins, mcp: McpServer, stores: _Stores
+) -> CodexSpawnSpec:
+    """Assemble the official Codex SDK worker specification."""
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="hamroh-codex-"))
+    schema_path = tmpdir / "schema.json"
+    schema_path.write_text(schema_json(), encoding="utf-8")
+    code_enabled = bool(plugins.tool_groups.get("code", False))
+    return CodexSpawnSpec(
+        model=config.model or None,
+        effort=config.effort,
+        system_prompt_path=Path("prompts/system.md").resolve(),
+        project_prompt_path=Path("prompts/project.md").resolve(),
+        json_schema_path=schema_path,
+        cwd=Path.cwd().resolve(),
+        session_id=_load_session_id(config),
+        codex_bin=config.codex_bin,
+        codex_home=config.codex_home,
+        sandbox="workspace-write" if code_enabled else "read-only",
+        codex_config=_build_codex_config(plugins, mcp),
+        enable_subagents=bool(plugins.tool_groups.get("subagents", False)),
+        subagents_prompt_path=Path("prompts/subagents.md").resolve(),
+        skills_index=render_skills_index(stores.skills),
+        memory_index=render_memory_index(stores.memory),
+        hamroh_tool_names=tuple(tool.name for tool in mcp.tools),
+    )
+
+
+def _build_worker_spec(
+    config: Config, plugins: Plugins, mcp: McpServer, stores: _Stores
+) -> WorkerSpec:
+    if config.provider == "codex":
+        return _build_codex_spec(config, plugins, mcp, stores)
+    return _build_cc_spec(config, plugins, mcp, stores)
+
+
 def _make_on_cc_stale_session(app: _App):
     """Stale-session notifier: drop the persisted id and tell the owner."""
 
@@ -499,7 +569,7 @@ def _make_on_cc_stale_session(app: _App):
             await dispatcher.bot.send_message(
                 chat_id=app.config.owner_id,
                 text=(
-                    "ℹ️ Previous Claude Code session expired — "
+                    "ℹ️ Previous AI session expired — "
                     "starting a fresh one. Your last message may need "
                     "to be resent. I'll carry a short recap of recent "
                     "messages into the next turn."
@@ -519,7 +589,7 @@ def _make_on_cc_giveup(app: _App):
 
     async def _on_cc_giveup(crash_count: int) -> None:
         log.error(
-            "⚠️ Shutting down — Claude Code failed %d times. "
+            "⚠️ Shutting down — the AI runtime failed %d times. "
             "The operator needs to intervene.",
             crash_count,
         )
@@ -612,12 +682,30 @@ async def _run_until_stopped(app: _App) -> None:
     assert app.reminder_task is not None
     stop_event = asyncio.Event()
     _install_signal_handlers(app.worker, stop_event)
+    stop_task = asyncio.create_task(stop_event.wait(), name="hamroh-stop-wait")
+    supervisor = getattr(app.worker, "_supervisor_task", None)
     try:
-        await stop_event.wait()
+        waiters = {stop_task}
+        if supervisor is not None:
+            waiters.add(supervisor)
+        done, _pending = await asyncio.wait(
+            waiters, return_when=asyncio.FIRST_COMPLETED
+        )
+        if supervisor is not None and supervisor in done:
+            # Propagate CrashLoop (or any unexpected supervisor defect) out of
+            # asyncio.run so Docker's on-failure policy can restart the bot.
+            await supervisor
     finally:
+        if not stop_task.done():
+            stop_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await stop_task
         # Persist session id first so the next start resumes it.
         if app.worker.session_id:
-            app.config.session_id_path.write_text(app.worker.session_id)
+            app.config.session_id_path.write_text(
+                app.worker.session_id, encoding="utf-8"
+            )
+            app.config.session_id_path.chmod(0o600)
         app.reminder_task.cancel()
         await app.dispatcher.stop()
         await app.engine.stop()

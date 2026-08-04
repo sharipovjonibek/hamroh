@@ -67,6 +67,14 @@ class FakeWorker:
         self._results.put_nowait(result)
 
 
+class RequeueInjectWorker(FakeWorker):
+    is_running = True
+
+    async def inject(self, text: str) -> bool:
+        self.injected.append(text)
+        return False
+
+
 @pytest.mark.asyncio
 async def test_debouncer_coalesces_burst() -> None:
     worker = FakeWorker()
@@ -102,6 +110,34 @@ async def test_inject_used_when_processing() -> None:
         await asyncio.sleep(0.05)
         assert len(worker.injected) == 1
         assert "mid-turn" in worker.injected[0]
+    finally:
+        await eng.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_steer_is_requeued_as_the_next_turn() -> None:
+    from hamroh.cc_worker import TurnResult
+    from hamroh.models import ControlAction
+
+    worker = RequeueInjectWorker()
+    eng = Engine(worker, _CFG, EngineOptions(debounce_ms=10))
+    await eng.start()
+    try:
+        await eng.submit(_msg("first", mid=1))
+        await asyncio.sleep(0.05)
+        await eng.submit(_msg("arrived during completion", mid=2))
+        assert len(worker.injected) == 1
+
+        worker.feed_result(
+            TurnResult(
+                control=ControlAction(action="stop", reason="done"),
+                user_visible_action=True,
+            )
+        )
+        await asyncio.sleep(0.35)
+
+        assert len(worker.sent) == 2
+        assert "arrived during completion" in worker.sent[1]
     finally:
         await eng.stop()
 

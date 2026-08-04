@@ -208,13 +208,17 @@ def test_build_argv_refuses_forbidden_flag(spec: CcSpawnSpec) -> None:
 
 def test_control_schema_is_strict() -> None:
     assert CONTROL_ACTION_SCHEMA["additionalProperties"] is False
-    assert CONTROL_ACTION_SCHEMA["required"] == ["action"]
+    assert CONTROL_ACTION_SCHEMA["required"] == ["action", "reason", "sleep_ms"]
     # Anthropic's tool input_schema rejects top-level oneOf/allOf/anyOf,
-    # so "reason required on stop" is enforced by the pydantic validator,
-    # not the schema. The schema keeps reason optional but capped.
+    # while OpenAI strict output requires every property. Nullable values keep
+    # provisional fields optional; terminal reason validation remains Pydantic.
     assert "allOf" not in CONTROL_ACTION_SCHEMA
     assert "oneOf" not in CONTROL_ACTION_SCHEMA
     assert "anyOf" not in CONTROL_ACTION_SCHEMA
+    assert CONTROL_ACTION_SCHEMA["properties"]["reason"]["type"] == [
+        "string",
+        "null",
+    ]
     assert CONTROL_ACTION_SCHEMA["properties"]["reason"]["maxLength"] > 0
 
 
@@ -359,7 +363,7 @@ def test_event_parser_logs_done_with_action(
 
 
 def test_structured_output_parsed_from_tool_use(spec: CcSpawnSpec, cfg: Config) -> None:
-    """Claudir confirmed: StructuredOutput arrives as a tool_use event,
+    """StructuredOutput arrives as a tool_use event,
     NOT in the result event's payload. This test pins the correct parsing
     path that was broken for the entire v1 release (always action=None).
     """

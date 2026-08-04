@@ -18,7 +18,7 @@ from hamroh.models import ChatMessage
 
 _REMINDER_XML = (
     '<reminder id="7" chat_id="-100" user_id="-1">'
-    '<skill name="self-reflection">run</skill>'
+    '<skill name="weekly-digest">run</skill>'
     "</reminder>"
 )
 

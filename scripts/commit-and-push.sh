@@ -40,7 +40,7 @@ if git diff --cached --quiet; then
     exit 0
 fi
 
-git -c user.name="hamroh" -c user.email="hamroh@localhost" \
+git -c user.name="Shahnoza Bot" -c user.email="shahnoza@localhost" \
     commit -m "sync server state [skip ci]"
 git pull --rebase
 git push

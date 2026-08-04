@@ -14,8 +14,8 @@ so runtime writes land in your checkout, ready to commit.
 
 The bot has full access: `memory_list`, `memory_search`, `memory_read`,
 `memory_write`, and `memory_append` all work here. Every memory is addressed
-by its full path starting with `memories/` (e.g. `memories/notes/references.md`);
-a bare `notes/references.md` is rejected.
+by its full path starting with `memories/` (e.g. `memories/notes/preferences.md`);
+a bare `notes/preferences.md` is rejected.
 
 Nothing here is loaded into the system prompt — memories are read on demand.
 
@@ -42,12 +42,10 @@ without reading it. Keep each file under **64 KiB**.
 memories/
 ├── README.md                          # this file
 ├── docs/{topic}-{YYYY-MM-DD}.md        # one-off reports / audits
-├── notes/
-│   ├── groups/{chat_id}.md             # per-group notes
-│   ├── users/{telegram_user_id}.md     # per-user notes
-│   └── {topic}.md                      # cross-session reference notes
-└── self/
-    └── learnings.md                    # mistakes and lessons to carry forward
+└── notes/
+    ├── groups/{chat_id}.md             # per-group notes
+    ├── users/{telegram_user_id}.md     # per-user notes
+    └── {topic}.md                      # cross-session reference notes
 ```
 
 ## Committing memories

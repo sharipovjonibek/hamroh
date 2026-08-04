@@ -136,30 +136,13 @@ async def list_pending_reminders(db: Database, chat_id: int) -> list:
     )
 
 
-async def pending_with_auto_seed_key(db: Database, key: str) -> int:
-    """Count PENDING reminders tagged with the given auto_seed_key.
-
-    Used by the startup seed hook. Only pending rows count as "exists"
-    — a cancelled or sent row means the reminder is not currently
-    active and the startup hook should re-seed. This is the "learning
-    cannot be stopped" guarantee: even if something (bot, operator,
-    manual SQL) cancels the self-reflection reminder, the next restart
-    re-seeds it.
-    """
-    row = await db.fetch_one(
-        "SELECT COUNT(*) AS c FROM reminders WHERE auto_seed_key = ? AND status = 'pending'",
-        (key,),
-    )
-    return int(row["c"]) if row is not None else 0
-
-
 async def pending_committed_keys(db: Database, prefix: str) -> set[str]:
     """Return the distinct auto_seed_keys of pending rows under ``prefix``.
 
     Used by the committed-reminders reconciler to diff the database against
     ``default-reminders.json``. The prefix scopes the match to committed
-    reminders, so other auto-seeded loops (e.g. ``self-reflection-default``) and
-    user-created reminders (NULL ``auto_seed_key``) are never touched.
+    reminders, so user-created reminders (NULL ``auto_seed_key``) and any
+    unrelated namespaces are never touched.
     """
     rows = await db.fetch_all(
         "SELECT DISTINCT auto_seed_key FROM reminders "
@@ -172,10 +155,9 @@ async def pending_committed_keys(db: Database, prefix: str) -> set[str]:
 async def cancel_auto_seeded(db: Database, key: str) -> int:
     """Cancel pending reminders tagged with the given auto_seed_key.
 
-    Counterpart to :func:`pending_with_auto_seed_key`. Used when an
-    auto-seeded loop (currently self-reflection) is switched off by the
-    operator so the existing pending row stops firing. Returns the number
-    of rows cancelled.
+    Used by the committed-reminder reconciler when an operator-declared
+    entry is removed, edited, or disabled. Returns the number of rows
+    cancelled.
     """
     cursor = await db.connection.execute(
         "UPDATE reminders SET status = 'cancelled' "

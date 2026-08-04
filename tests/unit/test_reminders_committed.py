@@ -2,8 +2,7 @@
 
 Verifies the reconciler makes the table match the file: declared reminders are
 seeded once, edits cancel the stale row and seed a fresh one, removed entries
-are cancelled, and rows from other sources (self-reflection, user-created) are
-never touched.
+are cancelled, and rows from other namespaces or users are never touched.
 """
 
 from __future__ import annotations
@@ -15,8 +14,12 @@ import pytest
 
 from hamroh.config import Config
 from hamroh.db.database import Database
-from hamroh.db.reminders import NewReminder, insert_reminder
-from hamroh.startup import _reconcile_committed_reminders, _seed_default_reminders
+from hamroh.db.reminders import (
+    NewReminder,
+    insert_auto_seeded_reminder,
+    insert_reminder,
+)
+from hamroh.startup import _reconcile_committed_reminders
 
 _OWNER = 42
 
@@ -219,21 +222,30 @@ async def test_disabling_a_reminder_cancels_it(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_self_reflection_row_is_untouched(tmp_path: Path) -> None:
-    """The committed reconciler must not cancel the self-reflection loop."""
+async def test_foreign_managed_row_is_untouched(tmp_path: Path) -> None:
+    """The reconciler only changes rows in the committed key namespace."""
     db, cfg = await _open(tmp_path)
-    object.__setattr__(cfg, "self_reflection_enabled", True)
     try:
-        await _seed_default_reminders(db, cfg)
+        await insert_auto_seeded_reminder(
+            db,
+            NewReminder(
+                chat_id=_OWNER,
+                user_id=-1,
+                text="External managed reminder",
+                trigger_at="2999-01-01 00:00:00",
+                cron_expr="0 0 * * *",
+            ),
+            "external:daily",
+        )
         _write_reminders(cfg, _ONE)
         await _reconcile_committed_reminders(db, cfg)
 
         row = await db.fetch_one(
             "SELECT status FROM reminders "
-            "WHERE auto_seed_key = 'self-reflection-default'"
+            "WHERE auto_seed_key = 'external:daily'"
         )
         assert row is not None and row["status"] == "pending", (
-            "self-reflection must stay pending — its key is outside 'committed:'"
+            "foreign managed rows must stay pending outside 'committed:'"
         )
     finally:
         await db.close()

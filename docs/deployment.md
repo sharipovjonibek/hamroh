@@ -9,27 +9,18 @@ workflow.
 - A VPS with SSH access
 - A GitHub repo with your hamroh code
 - A Telegram bot token (from @BotFather)
-- A Claude account (subscription or API) to generate a `CLAUDE_CODE_OAUTH_TOKEN`
+- A ChatGPT account whose plan includes Codex
+- A browser for the one-time ChatGPT login, with access to the host's local
+  OAuth callback on port `1455`
 
 ## Initial server setup (one-time)
 
 ```bash
-# SSH into your server
-ssh root@your-server-ip
+# SSH into your server and forward the browser OAuth callback to your computer
+ssh -L 1455:localhost:1455 root@your-server-ip
 
 # Install Docker
 curl -fsSL https://get.docker.com | sh
-
-# Install Node.js + Claude Code CLI
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-apt-get install -y nodejs
-npm install -g @anthropic-ai/claude-code
-
-# Generate a long-lived Claude auth token (interactive, opens a browser).
-# It prints a token starting with sk-ant-oat01-… — you set it as
-# CLAUDE_CODE_OAUTH_TOKEN in .env below. This is the auth path on every OS;
-# no `claude login` / Keychain / mounted credentials needed.
-claude setup-token
 
 # Clone your private repo (SSH auth — add server's public key to GitHub first)
 #   On server: ssh-keygen -t ed25519 (if no key exists)
@@ -39,12 +30,17 @@ cd ~/hamroh
 
 # Configure
 cp .env.example .env
-vim .env   # set TELEGRAM_BOT_TOKEN, HAMROH_OWNER_ID, CLAUDE_CODE_OAUTH_TOKEN, etc.
+chmod 600 .env
+vim .env   # set TELEGRAM_BOT_TOKEN and HAMROH_OWNER_ID; no OpenAI key is needed
 cp prompts/project.md.example prompts/project.md
 vim prompts/project.md   # customize identity, integrations, team info
 
-# Build and start
-docker compose up -d --build
+# Build, then authenticate this bot's private Codex home once.
+# The command prints an authorization URL; open it on your computer.
+make auth
+
+# Start
+make up
 
 # Verify it's running
 docker compose ps
@@ -53,10 +49,31 @@ docker compose logs -f   # should see "hamroh is live"
 
 DM your bot on Telegram to confirm it replies.
 
+`make auth` runs a short-lived `codex-auth` container, prints a ChatGPT browser
+authorization URL, and waits for the OAuth redirect on `localhost:1455`. The
+SSH port forwarding above routes that callback from your computer to the
+server. For a local desktop deployment, no SSH tunnel is needed: open the URL
+in a browser on the same computer.
+
+The auth container deliberately does not load `.env`, so the login helper
+cannot see the Telegram token or external MCP credentials. The resulting
+ChatGPT OAuth cache is stored in the named `codex-home` Docker volume and
+mounted at `/var/lib/codex` as `CODEX_HOME` in the agent. Do not mount a
+developer's general `~/.codex` directory: it mixes the bot's identity and
+conversation state with an interactive Codex setup. Check the isolated login
+at any time with `make auth-status`.
+
+Device-code login is not the default. If a remote or headless environment
+cannot forward the localhost callback, request that fallback explicitly:
+
+```bash
+docker compose run --rm codex-auth python -m hamroh.codex_login --device-code
+```
+
 ### Enabling capabilities
 
 The bot ships with a tight default surface — Telegram messaging,
-memory tools, reminders, and read-only web access only. Shell,
+memory tools, reminders, live search, and the path-restricted browser. Shell,
 code-editing, subagents, and any external MCPs are **all off by
 default**.
 
@@ -99,7 +116,7 @@ container after editing either file: `docker compose up -d
 Every time you push changes to GitHub:
 
 ```bash
-ssh root@your-server-ip 'cd ~/hamroh && ./scripts/commit-and-push.sh && git pull && docker compose up -d --build'
+ssh root@your-server-ip 'cd ~/hamroh && ./scripts/commit-and-push.sh && git pull && make up'
 ```
 
 Or step by step:
@@ -109,7 +126,7 @@ ssh root@your-server-ip
 cd ~/hamroh
 ./scripts/commit-and-push.sh   # commit the bot's memories so pull isn't blocked
 git pull
-docker compose up -d --build
+make up
 docker compose logs -f   # verify it started correctly
 ```
 
@@ -141,7 +158,7 @@ jobs:
             cd ~/hamroh
             ./scripts/commit-and-push.sh
             git pull
-            docker compose up -d --build
+            make up
 ```
 
 Then add these secrets to your GitHub repo (Settings → Secrets and
@@ -153,6 +170,11 @@ variables → Actions):
 | `SSH_PRIVATE_KEY` | Contents of `~/.ssh/id_ed25519` (generate with `ssh-keygen -t ed25519` and add the public key to the server's `~/.ssh/authorized_keys`) |
 
 Every push to `main` will automatically deploy to your server.
+
+The workflow reuses the existing `codex-home` volume. Run `make auth` once on
+the server before enabling automatic deployment, and run it again only if
+`make auth-status` reports that the ChatGPT login is no longer valid. Browser
+login is intentionally not automated or stored in GitHub Actions secrets.
 
 **Note:** Since the repo is private, the server needs SSH access to
 GitHub for `git pull` to work. Make sure the server's SSH key
@@ -173,10 +195,13 @@ repo and needs no migration. `data/` contains:
 
 - `data/hamroh.db` — SQLite database (messages, users, reminders,
   tool call logs) — starts fresh on new servers
-- `data/session_id` — Claude Code session ID for conversation continuity
+- `data/session_id` — persistent Codex thread ID for conversation continuity
 - `data/attachments/` — inbound photos/docs the dispatcher saved
 - `data/renders/` — outbound PNGs from `render_html`
-- `data/cc_logs/` — raw Claude Code subprocess logs
+- `data/logs/` — rotating application logs
+
+Codex authentication is not under `data/`: it lives in the private
+`codex-home` Docker volume mounted at `CODEX_HOME=/var/lib/codex`.
 
 Headless Chromium for `render_html` is pre-installed in the Docker
 image (`playwright install --with-deps chromium`) — no per-host
@@ -187,8 +212,9 @@ provisioning step needed.
 **Migrating from another server:** nothing in `data/` is worth copying. The
 bot's memory lives in the git-tracked `memories/` folder, so a fresh
 `git clone` (or `git pull`) brings every note with it. Don't copy `session_id`
-or `hamroh.db` to a new server — stale session IDs cause CC subprocess crashes,
-and the database will rebuild naturally from new messages.
+or `hamroh.db` to a new server — the database rebuilds naturally from new
+messages and a thread ID is meaningful only with its original Codex state.
+Authenticate the destination's fresh `codex-home` volume with `make auth`.
 
 ## Syncing memories and config
 
@@ -246,32 +272,51 @@ Another instance is polling the same bot token. Make sure only one is
 running — check both local (`pkill -f 'python -m hamroh'`) and
 Docker (`docker compose down`).
 
-### CC subprocess crashes (rc=1, empty stderr)
+### Codex runtime cannot start or repeatedly reconnects
 
 Common causes:
 
-- **Stale session ID** — delete `data/session_id` and restart. This
-  happens after renaming the project folder or moving to a new server.
-- **MCP server not reachable** — the `--strict-mcp-config` flag makes
-  Claude exit if any MCP server in the config fails to connect. Check
-  that `uvx` and `npx` are available inside the container.
+- **Login missing or expired** — run `make auth-status`, then `make auth` if
+  needed. Authentication must exist in the same `codex-home` volume the agent
+  mounts.
+- **Stale thread ID** — normally Hamroh detects this and creates a fresh
+  thread. If startup cannot recover, stop the agent, delete `data/session_id`,
+  and run `make up`.
+- **Hamroh MCP unavailable** — the local `hamroh` MCP is marked `required` in
+  Codex's per-thread config. Inspect `docker compose logs hamroh` for its URL
+  and startup error. Optional external MCPs do not make the core server
+  optional.
+- **External stdio MCP command missing** — commands such as `npx` must exist
+  in the image when that plugin is enabled.
 
-### Claude Code auth failed / `Not logged in · Please run /login`
+### Codex/ChatGPT authentication failed
 
-The bot authenticates with the `CLAUDE_CODE_OAUTH_TOKEN` set in `.env`,
-not with `claude login` or the host's stored credentials. If you see an
-auth error, the token is missing or has been revoked. Generate a fresh
-one and restart:
+There is no OpenAI API key or OAuth token to paste into `.env`. Authenticate
+the dedicated volume through the helper:
 
 ```bash
-ssh root@your-server-ip
+ssh -L 1455:localhost:1455 root@your-server-ip
 cd ~/hamroh
-claude setup-token          # prints a new sk-ant-oat01-… token
-vim .env                    # set CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-…
-docker compose restart
+make auth-status
+make auth                   # prints a URL; finish sign-in in your browser
+make up
 ```
 
-This is the same procedure on Linux, macOS, and Windows. Because the
-token comes from an env var, there is no macOS Keychain export and no
-`~/.claude/.credentials.json` to keep in sync — the old platform-specific
-workarounds no longer apply.
+Keep that SSH session open until the browser returns to `localhost:1455` and
+`make auth` reports that login completed.
+
+The official `openai-codex` SDK launches its pinned Codex app-server. The
+worker gives that process a minimal environment, a private `CODEX_HOME`, and
+no ambient Telegram/plugin secrets. External MCP credentials are passed only
+inside the explicitly configured server entry. A ChatGPT subscription
+authorizes Codex usage; it does not create general OpenAI API credits for
+unrelated API clients.
+
+### Legacy Claude provider
+
+`HAMROH_PROVIDER=claude` keeps the former `cc_worker` path available for
+compatibility. It is not the Docker default: the image no longer installs the
+Claude CLI or mounts Claude credentials. A legacy deployment must provide its
+own compatible `claude` binary/authentication, set `HAMROH_MODEL`, and accept
+that the Claude-specific session/logging behavior documented in older
+revisions differs from the Codex worker.

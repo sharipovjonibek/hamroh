@@ -5,17 +5,17 @@ FROM python:3.11-slim AS builder
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
-COPY pyproject.toml README.md ./
-COPY hamroh/ hamroh/
+COPY pyproject.toml uv.lock ./
 
-# Create venv and install production dependencies (not dev/test)
-RUN uv venv /app/.venv && \
-    uv pip install --python /app/.venv/bin/python . --no-cache-dir
+# Install only the frozen production dependency set. Application source is
+# copied into the runtime image later, so ordinary code edits keep this large
+# SDK/Playwright dependency layer (and the browser layer) cached.
+RUN uv sync --frozen --no-install-project --no-cache
 
 # Stage 2: Runtime
 FROM python:3.11-slim
 
-# Install Node.js (needed for Claude Code CLI + npx for GitLab MCP) and
+# Install Node.js (needed by optional npx-based MCP servers) and
 # tini (a minimal init that reaps zombies — important since render_html
 # spawns Chromium as a subprocess; if Chromium gets orphaned we don't
 # want it lingering as a zombie under python-as-PID-1).
@@ -24,9 +24,6 @@ RUN apt-get update && \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# Install Claude Code CLI
-RUN npm install -g @anthropic-ai/claude-code
 
 # Copy Python venv from builder
 COPY --from=builder /app/.venv /app/.venv
@@ -63,7 +60,8 @@ COPY access.json.example access.json* ./
 # runtime and reconciled into the DB at boot. The image-baked copy is the seed.
 COPY default-reminders.json.example default-reminders.json* ./
 
-# Data directory (mount as volume)
+# Data directory (mount as volume). The official Codex Python SDK ships its
+# matching CLI runtime; authentication lives under $CODEX_HOME at runtime.
 VOLUME /app/data
 
 ENTRYPOINT ["/usr/bin/tini", "--"]

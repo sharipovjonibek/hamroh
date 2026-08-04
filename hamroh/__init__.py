@@ -1,3 +1,3 @@
-"""hamroh — Python harness for running a Telegram agent powered by Claude Code."""
+"""hamroh — a Telegram agent harness powered by the OpenAI Codex SDK."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

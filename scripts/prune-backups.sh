@@ -4,10 +4,10 @@
 #
 # Every successful write_instructions / append_instructions call
 # writes a timestamped copy of the previous content to
-# data/prompt_backups/<name>-<UTC timestamp>.md. After a year of
-# daily self-reflection promotions that's ~365 small files. This
-# script keeps the N most-recent backups per prompt file and moves
-# older ones to data/prompt_backups/archive/.
+# data/prompt_backups/<name>-<UTC timestamp>.md. Frequent instruction
+# updates can accumulate many small files, so this script keeps the N
+# most-recent backups per prompt file and moves older ones to
+# data/prompt_backups/archive/.
 #
 # Usage:
 #   ./scripts/prune-backups.sh                 # dry-run by default

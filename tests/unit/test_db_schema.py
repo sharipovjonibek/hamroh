@@ -82,6 +82,37 @@ async def test_reminders_has_auto_seed_key(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_removed_reflection_migration_cancels_active_legacy_rows(
+    tmp_path: Path,
+) -> None:
+    db = await _open(tmp_path)
+    legacy_key = "self-reflection-default"
+    try:
+        for status in ("pending", "processing", "sent"):
+            await db.execute(
+                "INSERT INTO reminders ("
+                "chat_id, user_id, text, trigger_at, cron_expr, status, "
+                "created_at, auto_seed_key"
+                ") VALUES (1, -1, 'legacy', '2999-01-01 00:00:00', "
+                "'0 0 * * *', ?, '2026-01-01 00:00:00', ?)",
+                (status, legacy_key),
+            )
+        await db.execute("DELETE FROM schema_migrations WHERE version = 10")
+    finally:
+        await db.close()
+
+    db = await Database.open(Config.for_test(tmp_path).db_path)
+    try:
+        rows = await db.fetch_all(
+            "SELECT status FROM reminders WHERE auto_seed_key = ? ORDER BY id",
+            (legacy_key,),
+        )
+        assert [row["status"] for row in rows] == ["cancelled", "cancelled", "sent"]
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_rate_limits_schema(tmp_path: Path) -> None:
     db = await _open(tmp_path)
     try:
@@ -129,6 +160,7 @@ async def test_migration_is_idempotent(tmp_path: Path) -> None:
         assert 3 in versions
         assert 4 in versions
         assert 5 in versions
+        assert 10 in versions
     finally:
         await db.close()
 

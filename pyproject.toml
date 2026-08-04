@@ -1,13 +1,17 @@
 [project]
 name = "hamroh"
-version = "0.1.0"
-description = "Python harness for running a Telegram agent powered by a Claude Code subprocess and a local MCP server."
+version = "0.2.0"
+description = "Python harness for running a Telegram agent through the OpenAI Codex SDK and a local MCP server."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "rustam_z" }]
+authors = [{ name = "Jonibek Sharipov" }]
 
 dependencies = [
+    "openai-codex==0.1.0b3",
+    # The SDK pins this matching alpha CLI transitively. Declaring the same
+    # exact requirement here opts only this package into uv prereleases.
+    "openai-codex-cli-bin==0.137.0a4",
     "mcp>=1.2.0",
     "uvicorn>=0.30",
     "starlette>=0.37",
@@ -56,7 +60,7 @@ log_cli_level = "INFO"
 # carry their own timestamp/level/component, so a second prefix is just noise.
 log_cli_format = "%(message)s"
 markers = [
-    "e2e: real end-to-end tests against live Telegram + claude (opt-in; skip without creds)",
+    "e2e: real end-to-end tests against live Telegram + configured AI provider (opt-in; skip without creds)",
     "slow: tests that sleep/wait for a while, e.g. to wait for a session reset or subprocess restart",
     "smoke: fast critical-path subset proving the bot is alive (basic reply, DM + group)",
 ]

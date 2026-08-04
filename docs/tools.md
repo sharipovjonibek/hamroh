@@ -1,14 +1,14 @@
 # Tools reference
 
 This is the canonical list of every tool available to the bot, organised
-by what's on by default and what's opt-in. Each opt-in section names the
-env var(s) that flip the gate.
+by what's on by default and what's opt-in. Capability gates live in
+`plugins.json`; `.env` supplies credentials referenced by external MCP entries.
 
-For Claude Code's full upstream tool catalogue (some of which hamroh
-doesn't currently expose) see
-<https://code.claude.com/docs/en/tools-reference>. The
-"Other CC tools you can wire in" section at the bottom of this page
-points at the ones a fork might want to add.
+The default provider is the official OpenAI Codex SDK. Runtime capabilities
+are constrained by Codex thread configuration and sandbox policy; Hamroh tools
+are independently constrained by the local MCP server's exact enabled-tool
+list. The legacy Claude provider remains available for compatibility, but its
+CLI-specific tool catalogue is not the default described here.
 
 ---
 
@@ -37,7 +37,7 @@ server. Auto-discovered from `hamroh/tools/*.py` (each tool is a
 
 ### Browser
 
-Drive a real headless Chromium for pages `WebFetch` can't reach
+Drive a real headless Chromium for pages a simple web fetch can't reach
 (JS-rendered, multi-step, form-driven). One warm browser is reused for
 the whole session; `browser_navigate` opens a page and the rest of the
 tools act on that **same page** across the turn — so flows like *search →
@@ -102,7 +102,7 @@ description: <one-line summary used to find this memory without reading it>
 There is no `delete_memory` by design — overwriting is the supported
 "forget" path. Operator handles real deletion on host.
 
-### Self-editing (project prompt)
+### Project prompt management
 
 | Tool | What it does |
 |---|---|
@@ -116,22 +116,24 @@ git-tracked, and bot edits would pollute the repo.
 
 | Tool | What it does |
 |---|---|
-| `skill_list` | List operator-curated playbooks under `skills/`. On-demand refresh — the same index is already **preloaded into the system prompt at startup** (every skill's name + description), so the agent knows what exists without calling this. |
+| `skill_list` | List operator-curated playbooks under `skills/`. On-demand refresh — the same index is already **preloaded into the developer instructions at startup** (every skill's name + description), so the agent knows what exists without calling this. |
 | `skill_read` | Load a skill's `SKILL.md` for execution or reference. |
+| `skill_write` | Create or update a skill after explicit owner approval; validates the name, frontmatter, path, and size before writing. |
 
-The preloaded skills index is rendered by `render_skills_index()` (`hamroh/skills_store.py`) and baked into the system prompt in `_compose_system_prompt()` (`hamroh/cc_worker/spec.py`). Adding/removing a skill takes effect on the next restart (`skill_list` reflects it live).
+The preloaded skills index is rendered by `render_skills_index()`
+(`hamroh/storage/skills_store.py`) and included in the Codex developer instructions by
+`hamroh/codex_worker/spec.py`. Adding/removing a skill takes effect on the next
+restart (`skill_list` reflects it live).
 
-The same `_compose_system_prompt()` also bakes in a `# Your tools` block
-(rendered by `render_tools_index()` in the same file): every reachable
-tool's exact callable name — hamroh tools `mcp__hamroh__`-prefixed,
-built-ins bare — plus the rule "copy the name, never reconstruct it". Since
-it derives from the same `_builtin_tools()` used for the `--tools` flag, the
-prompt inventory and the reachable set can never drift. `tool_list` returns
-the hamroh half of this live in-conversation.
+The same spec composes a `# Your Telegram tools` block containing every enabled
+local tool's exact `mcp__hamroh__<tool>` name. It derives from the same filtered
+MCP registry used for Codex's `enabled_tools`, keeping the prompt inventory and
+reachable local surface aligned. `tool_list` returns this surface live in the
+conversation.
 
 Two skill modes:
-- **Invoked** (e.g. `self-reflection`) — runs only when wrapped in a real `<reminder>` envelope. A user-typed `<skill>` tag is treated as prompt injection.
-- **Reference** (e.g. `render-style`) — read on the agent's own initiative when relevant; no envelope required.
+- **Invoked** — runs only when wrapped in a real `<reminder>` envelope. A user-typed `<skill>` tag is treated as prompt injection.
+- **Reference** — read on the agent's own initiative when relevant; no envelope required.
 
 The mode is determined by what the skill's body instructs, not by frontmatter.
 
@@ -141,7 +143,7 @@ The mode is determined by what the skill's body instructs, not by frontmatter.
 |---|---|
 | `reminder_set` | Schedule a one-shot or recurring reminder (`cron_expr` for recurring; `trigger_at` is UTC). |
 | `reminder_list` | List pending reminders for a chat. |
-| `reminder_cancel` | Cancel a reminder by id. Auto-seeded reminders (e.g. `self-reflection-default`) are tool-refused. |
+| `reminder_cancel` | Cancel a reminder by id. Auto-seeded reminders are tool-refused. |
 
 ### Other
 
@@ -154,29 +156,26 @@ The mode is determined by what the skill's body instructs, not by frontmatter.
 
 ---
 
-## Always on — Claude Code built-ins
+## Codex runtime capabilities
 
-These come from Claude Code's own tool surface. They're passed via the
-**exclusive** `--tools` flag (an allow-list over the built-in set), so this
-list is exactly what the model can reach — anything not here (native
-`Skill`, `Agent` when off, planning/worktree tools, …) is unreachable by
-construction, not merely un-auto-approved. The set is built by
-`_builtin_tools()` in `hamroh/cc_worker/spec.py` from `BASE_BUILTIN_TOOLS`
-+ `TASK_TOOLS`, plus whatever the `tool_groups` flags unlock.
+These are not local Hamroh MCP tools and therefore do not appear in
+`tool_list`. `startup._build_codex_config()` controls them for each persistent
+thread instead of reading the operator's general Codex configuration.
 
-| Tool | What it does |
-|---|---|
-| `WebFetch` | Fetch a URL and ask a small model to extract from it. The system prompt forbids internal/private URLs (localhost, RFC1918, link-local) — refuse those. |
-| `WebSearch` | Web search via Claude Code's built-in. |
-| `StructuredOutput` | The turn-end tool: the model calls it with `{action, reason, …}` to close each turn. The worker keys on it (`event_handlers.py`), so it must always be reachable. |
-| `ToolSearch` | Load deferred tool schemas on demand. Idle when nothing is deferred (hamroh's own tools are `alwaysLoad`); does real work once an external MCP is configured. |
-| `ListMcpResourcesTool` / `ReadMcpResourceTool` | Reach MCP *resources* (URI-addressable data) an external MCP server may expose. hamroh's own server exposes none, so these are no-ops until a resource-bearing MCP is enabled. |
-| `WaitForMcpServers` | Block on an external MCP server that is still connecting. |
-| `TaskCreate` / `TaskGet` / `TaskList` / `TaskUpdate` | Session task-checklist, so the bot can track a multi-step turn (e.g. a research digest fanning out over many sources). No permission required. |
+| Capability | Default | Policy |
+|---|---:|---|
+| Live web search | on | Codex `web_search="live"`. This is separate from Hamroh's stateful `browser_*` tools. |
+| Shell / command execution | off | `features.shell_tool` and `features.unified_exec` turn on when either `tool_groups.bash` or `tool_groups.code` is enabled. |
+| Filesystem writes | off | The Codex sandbox is `read-only`; enabling `tool_groups.code` changes it to `workspace-write`. Full host access is never selected. |
+| Multi-agent work | off | `features.multi_agent` follows `tool_groups.subagents`, and the subagent prompt is loaded only when enabled. |
+| Structured turn result | on | Every SDK turn receives Hamroh's JSON output schema. The final agent message must validate as `{action, reason, ...}`; this replaces the legacy provider's `StructuredOutput` tool. |
+| Apps/plugins/hooks/goals/runtime memory/personality | off | Hamroh supplies explicit MCP tools, prompts, files, reminders, and persistence instead. |
 
-The MCP-discovery and task tools are read-only / no-permission and harmless
-when idle. `TaskStop`/`TaskOutput` are deliberately omitted (background-task
-control the fire-and-forget bot doesn't need; `TaskOutput` is deprecated).
+All Codex turns use `approval_mode=deny_all`, with a second fail-closed handler
+for any unexpected approval request. Operator-selected MCP tools are approved
+in the server config because there is no interactive terminal, but they still
+remain limited by `enabled_tools`, Hamroh's own tool rails, access policy, and
+the Codex sandbox.
 
 ---
 
@@ -217,19 +216,21 @@ Changes to either take effect on container restart.
 }
 ```
 
-* `tool_groups` — flips for the Claude-Code built-ins below
-  (`bash`, `code`, `subagents`). Edit and restart to flip.
+* `tool_groups` — maps the provider-neutral `bash`, `code`, and
+  `subagents` switches onto Codex feature and sandbox settings. Edit and
+  restart to apply.
 * `mcps[].name` is **load-bearing** — it becomes the
   `mcp__<name>__<tool>` namespace the model sees. Renaming breaks
   operator memory, prompts, and tests. The defaults match today's
   keys exactly (`mcp-atlassian`, `mcp-gitlab`, `github`).
-* `mcps[].type` selects the transport: `stdio` (default), `http`, or
-  `sse`. Mirrors what Claude Code's `--mcp-config` accepts. See
-  "MCP transports" below for the per-transport field shape.
-* `mcps[].allowed_tools` is one flat list — exact tool name
-  (`mcp__mcp-atlassian__jira_search`) or a server-prefix shorthand
-  (`mcp__mcp-gitlab`). Both forms are accepted by Claude Code's
-  `--allowedTools`.
+* `mcps[].type` selects `stdio` (default), `http`, or the legacy `sse`
+  spelling. Codex receives `stdio` directly; both remote spellings are sent
+  as a remote URL, with a warning for `sse`. See "MCP transports" below.
+* `mcps[].allowed_tools` is one flat provider-neutral list. A server-prefix
+  shorthand (`mcp__mcp-gitlab`) omits Codex's `enabled_tools`, meaning every
+  tool from that server. Exact names (`mcp__mcp-atlassian__jira_search`) are
+  converted to bare Codex names (`jira_search`). A namespace mismatch is a
+  startup error, preventing a typo from widening access.
 * `${VAR}` interpolation runs over `args` (each element), `env`
   values, `url`, and `headers` values — pulling from the process
   env (i.e. `.env`). Concatenation works (`${GITLAB_URL}/api/v4`).
@@ -243,10 +244,9 @@ Changes to either take effect on container restart.
 
 ### MCP transports
 
-Three transports are supported, exactly as the [MCP
-spec](https://modelcontextprotocol.io) and Claude Code's
-`--mcp-config` define them. Mixing fields across transports
-(e.g. `command` on an `http` entry) crashes boot.
+The plugin schema accepts three transport labels. Mixing fields across
+transports (for example `command` on an `http` entry) crashes boot. The Codex
+translation is described for each one below.
 
 **`stdio`** — local subprocess (default). hamroh spawns the
 command, talks over stdin/stdout. Auth via the subprocess `env`
@@ -279,8 +279,9 @@ remote MCP, etc.) where you've already issued a PAT or OAuth token.
 }
 ```
 
-**`sse`** — Server-Sent Events transport. Same field shape as
-`http`. Some hosted MCPs use this; check vendor docs.
+**`sse`** — compatibility label for older plugin files. It has the same field
+shape as `http`; Hamroh warns and asks Codex to connect to the URL as remote
+HTTP. Prefer a vendor's streamable-HTTP endpoint when one is available.
 
 ```jsonc
 {
@@ -293,10 +294,11 @@ remote MCP, etc.) where you've already issued a PAT or OAuth token.
 }
 ```
 
-**Auth.** Hamroh doesn't manage OAuth flows — supply an
-already-issued token via `${VAR}` interpolation. For interactive
-OAuth-managed servers, see Claude Code's MCP docs (it can run the
-flow on your behalf when configured outside `plugins.json`).
+**Auth.** Hamroh doesn't run an external server's interactive OAuth flow.
+Supply an already-issued token through `${VAR}` interpolation in explicit
+`env` or static `headers`. These credentials are passed only to that MCP
+configuration; they are removed from the environment used to launch the Codex
+app-server.
 
 ### Tool groups
 
@@ -305,37 +307,23 @@ These three groups default to **off**. Flip in `plugins.json`
 
 #### `bash` — shell execution
 
-| Tool | What it does |
-|---|---|
-| `Bash` | Run shell commands. |
-| `PowerShell` | Run PowerShell commands (Windows / opt-in via `CLAUDE_CODE_USE_POWERSHELL_TOOL`). |
-| `Monitor` | Watch a long-running process and stream output back to the model. |
-
-These all share Claude Code's "permission required" risk class — same
-trust class. Off by default for safety.
+Enables Codex's shell/unified execution features while retaining a read-only
+filesystem sandbox. This is useful for inspection commands that do not need to
+modify the checkout. Interactive approvals remain denied, so do not enable it
+unless unattended command execution is appropriate for this agent.
 
 #### `code` — code work
 
-| Tool | What it does |
-|---|---|
-| `Edit` | Targeted edits to a file. |
-| `Write` | Create or overwrite a file. |
-| `Read` | Read a file. |
-| `NotebookEdit` | Edit Jupyter notebook cells. |
-| `Glob` | Find files by glob pattern. |
-| `Grep` | Search file contents. |
-| `LSP` | Code intelligence — definitions, references, type errors. Requires a code-intelligence plugin to be installed. |
-
-Useful unit when you want the bot to do real code work (not just chat).
-The Telegram-assistant deployment leaves this off and relies on memory
-+ project.md for everything it needs to remember.
+Enables the same Codex shell/unified execution features and changes the sandbox
+from `read-only` to `workspace-write`. This is the switch for modifying files
+inside the mounted project. The Telegram-assistant deployment leaves it off
+and relies on memory plus `project.md` for durable state.
 
 #### `subagents`
 
 | Tool | What it does |
 |---|---|
-| `Agent` | Spawn a subagent with its own context window for an isolated task. Token-heavy — leave off unless you need it. When off, the subagent docs (`prompts/subagents.md`) aren't even loaded, so the model doesn't know the capability exists. |
-| `SendMessage` | Resume/steer a background subagent (or message an agent-team teammate). Unlocked together with `Agent`. |
+| Codex multi-agent feature | Delegate isolated work through the runtime's multi-agent capability. Token-heavy — leave off unless needed. When off, `prompts/subagents.md` is not included in the developer instructions. |
 
 ### Adding a new external MCP
 
@@ -380,7 +368,7 @@ photos and documents. The operator owns this trade-off.
 Add the skill's directory name to `skills_disabled`:
 
 ```jsonc
-{ "skills_disabled": ["render-style"] }
+{ "skills_disabled": ["example-skill"] }
 ```
 
 Restart. `skill_list` no longer surfaces it and `skill_read` raises
@@ -392,14 +380,15 @@ Restart. `skill_list` no longer surfaces it and `skill_read` raises
 The default `plugins.json` ships an `mcp-atlassian` entry pointed at
 Atlassian's official remote MCP (`https://mcp.atlassian.com/v1/sse`,
 `type: sse`). It's `enabled: false` by default — flip it to `true` to
-advertise the `mcp__mcp-atlassian` tools on `--allowedTools`.
+advertise the `mcp__mcp-atlassian` tools. Codex treats this legacy SSE
+entry as a remote HTTP URL and Hamroh logs a compatibility warning; verify the
+vendor's current streamable-HTTP endpoint before enabling it.
 
-**Auth is OAuth, not env vars.** The remote server authenticates via
-OAuth, which hamroh does not manage. Establish the grant once on the
-host with Claude Code (`claude mcp add --transport sse atlassian
-https://mcp.atlassian.com/v1/sse`, then complete the browser login);
-Claude Code reuses the stored token. The headless bot can't run the
-browser flow itself, so the OAuth grant must already exist on the host.
+**Auth is not automatic.** Hamroh's headless plugin loader does not run
+Atlassian's browser OAuth flow. Do not assume a grant in the operator's
+`~/.codex` is visible: the bot intentionally uses a private `CODEX_HOME`.
+Configure a supported non-interactive credential/header flow when Atlassian
+offers one, or leave this sample disabled.
 
 For the tool list and capabilities see Atlassian's remote MCP docs.
 
@@ -408,8 +397,8 @@ For the tool list and capabilities see Atlassian's remote MCP docs.
 The default `plugins.json` ships an `mcp-gitlab` entry that
 references both vars. When they're set in `.env`, the `mcp-gitlab`
 server spawns *and* the `mcp__mcp-gitlab` prefix is added to
-`--allowedTools`. Unlike the Jira server, mcp-gitlab is GitLab-only —
-the prefix match is safe.
+Codex's configured MCP surface. Unlike the Jira server, mcp-gitlab is
+GitLab-only — the prefix match is safe.
 
 For the canonical GitLab tool list see upstream
 <https://github.com/zereight/mcp-gitlab>.
@@ -419,7 +408,7 @@ For the canonical GitLab tool list see upstream
 The default `plugins.json` ships a `github` entry that references the
 token. When set in `.env`, the `github` MCP server spawns (via `npx
 -y @modelcontextprotocol/server-github`) *and* the `mcp__github`
-prefix is added to `--allowedTools`. Single-vendor server, blanket
+prefix makes every server tool available. Single-vendor server, blanket
 prefix match is safe.
 
 GitHub.com is the default. For GitHub Enterprise, add a
@@ -506,42 +495,30 @@ lines explain each MCP's outcome.
 
 ---
 
-## Other CC tools you can wire in
+## Extending the Codex runtime surface
 
-hamroh doesn't expose every Claude Code built-in. The remaining
-omissions are deliberate (see the full-catalog audit in the
-`BASE_BUILTIN_TOOLS` comment in `hamroh/cc_worker/spec.py`). A fork that
-wants any of these can add it to `BASE_BUILTIN_TOOLS` (always on) or a
-gated set (`BASH_TOOLS`, `CODE_TOOLS`, `SUBAGENT_TOOLS`) in that same file;
-`_builtin_tools()` assembles the final `--tools` list.
+Prefer adding a narrowly scoped Hamroh tool or external MCP entry over enabling
+an entire runtime feature. That keeps the action schema visible in
+`plugins.json`, allows per-tool filtering, and preserves Hamroh's audit log and
+domain rails.
 
-Already exposed (don't re-add): the task-checklist tools (`TaskCreate`,
-`TaskGet`, `TaskList`, `TaskUpdate`) and MCP-discovery tools
-(`ToolSearch`, `ListMcpResourcesTool`, `ReadMcpResourceTool`,
-`WaitForMcpServers`) are on by default; `SendMessage` unlocks with
-`subagents`.
+Provider-native features are configured in `_build_codex_config()` in
+`hamroh/startup.py`. Any new feature must also have an explicit sandbox and
+approval decision, tests showing that Telegram/plugin secrets do not enter the
+Codex process, and documentation here. The current omissions are deliberate:
 
-Notable upstream tools still **off** on purpose:
+- Codex apps and remote plugins are disabled; external services enter through
+  the explicit `mcps` list.
+- Codex runtime memories and personality are disabled; Hamroh owns
+  `memories/` and `prompts/project.md`.
+- Runtime hooks and goals are disabled; reminders and the engine control loop
+  provide scheduling and continuation.
+- Full host access is unsupported. The maximum selectable sandbox is
+  `workspace-write`, gated by `tool_groups.code`.
+- Interactive approvals are denied because a Telegram turn has no trusted
+  operator terminal. A capability that requires confirmation needs a
+  Telegram-native authorization design before it can be enabled safely.
 
-- **`Skill`** — hamroh runs skills through its own
-  `<reminder><skill>` envelope + `mcp__hamroh__skill_read`, not CC's
-  native `Skill` tool; leaving it on is a dead-end (empty registry).
-- **Scheduled tasks** — `CronCreate`, `CronDelete`, `CronList`. Would
-  duplicate hamroh's own `reminder_*` tools.
-- **`PushNotification` / `SendUserFile`** — hamroh delivers over
-  Telegram; these need Anthropic push infra / Remote Control.
-- **`AskUserQuestion`** — interactive multi-choice UI, dead in
-  `--print` headless mode; the bot asks via Telegram instead.
-- **Planning & worktrees** — `EnterPlanMode`, `ExitPlanMode`,
-  `EnterWorktree`, `ExitWorktree`. Dev-loop tools; useful for
-  code-work forks.
-- **`Artifact`, `RemoteTrigger`, `ScheduleWakeup`,
-  `ShareOnboardingGuide`, `Workflow`, `TodoWrite`, `ReportFindings`** —
-  claude.ai / Team-plan / deprecated / not applicable to a chat bot.
-- **`TaskStop` / `TaskOutput`** — background-task control the
-  fire-and-forget bot doesn't need (`TaskOutput` is deprecated).
-
-For each, the upstream
-<https://code.claude.com/docs/en/tools-reference> is authoritative —
-it lists permission requirements and behaviour notes that may change
-between CC versions.
+The optional `HAMROH_PROVIDER=claude` path still uses the allow/deny sets in
+`hamroh/cc_worker/spec.py`; consult that legacy implementation only when
+maintaining a Claude deployment.

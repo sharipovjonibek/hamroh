@@ -22,6 +22,7 @@ hamroh's plumbing, not their uptime.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -32,8 +33,12 @@ import pytest
 from hamroh.plugins import load_plugins
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("claude") is None,
-    reason="claude CLI not on PATH — install Claude Code to run integration tests",
+    os.environ.get("HAMROH_PROVIDER", "codex").strip().lower() != "claude"
+    or shutil.which("claude") is None,
+    reason=(
+        "legacy Claude MCP integration requires HAMROH_PROVIDER=claude "
+        "and an authenticated claude CLI"
+    ),
 )
 
 

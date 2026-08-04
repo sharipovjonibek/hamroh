@@ -23,11 +23,11 @@ def _new_skill(name: str) -> str:
 
 
 _VALID = """---
-name: self-reflection
+name: example-skill
 description: A test skill for tool-level unit testing. This is what skill_list surfaces.
 ---
 
-# self-reflection
+# example-skill
 
 Body.
 """
@@ -35,8 +35,8 @@ Body.
 
 def _store(tmp_path: Path) -> SkillsStore:
     root = tmp_path / "skills"
-    (root / "self-reflection").mkdir(parents=True)
-    (root / "self-reflection" / "SKILL.md").write_text(_VALID)
+    (root / "example-skill").mkdir(parents=True)
+    (root / "example-skill" / "SKILL.md").write_text(_VALID)
     s = SkillsStore(root=root)
     s.ensure_root()
     return s
@@ -52,12 +52,12 @@ async def test_skill_list_returns_names_and_descriptions(tmp_path: Path) -> None
     ctx = _ctx(store)
     result = await ListSkillsTool(ctx).run(ListSkillsArgs())
     assert result.is_error is False
-    assert "self-reflection" in result.content
+    assert "example-skill" in result.content
     assert "tool-level unit testing" in result.content
     assert result.data is not None
     assert result.data["skills"] == [
         {
-            "name": "self-reflection",
+            "name": "example-skill",
             "description": "A test skill for tool-level unit testing. "
             "This is what skill_list surfaces.",
         },
@@ -78,10 +78,10 @@ async def test_skill_list_empty(tmp_path: Path) -> None:
 async def test_skill_read_returns_content(tmp_path: Path) -> None:
     store = _store(tmp_path)
     ctx = _ctx(store)
-    result = await ReadSkillTool(ctx).run(ReadSkillArgs(name="self-reflection"))
+    result = await ReadSkillTool(ctx).run(ReadSkillArgs(name="example-skill"))
     assert result.is_error is False
     assert result.content.startswith("---")
-    assert "name: self-reflection" in result.content
+    assert "name: example-skill" in result.content
 
 
 @pytest.mark.asyncio

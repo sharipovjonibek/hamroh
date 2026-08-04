@@ -77,7 +77,12 @@ class SetReminderArgs(BaseModel):
     user_id: int = Field(
         description="Numeric Telegram user id who requested the reminder."
     )
-    text: str = Field(description="The reminder message text.")
+    text: str = Field(
+        description=(
+            "Self-contained reminder text that states the requested action and "
+            "any context the future turn will need."
+        )
+    )
     trigger_at: str = Field(
         description=(
             "When to fire, as a UTC ISO-8601 datetime string with offset "
@@ -192,9 +197,8 @@ class CancelReminderTool(BaseTool[CancelReminderArgs]):
     name = "reminder_cancel"
     description = (
         "Cancel a pending reminder by id (get ids from reminder_list). "
-        "Auto-seeded mandatory reminders (e.g. the self-reflection loop) "
-        "cannot be cancelled through this tool — attempts are refused and the "
-        "reminder continues to fire on schedule."
+        "Reminders managed by default-reminders.json cannot be cancelled "
+        "through this tool; edit that operator-owned file and restart instead."
     )
     args_model = CancelReminderArgs
 
@@ -202,16 +206,15 @@ class CancelReminderTool(BaseTool[CancelReminderArgs]):
         if self.ctx.database is None:
             return ToolResult(content="database unavailable", is_error=True)
 
-        # Hard-gate: auto-seeded reminders represent mandatory, operator-
-        # installed loops (currently: self-reflection). They are not
-        # cancellable via the agent tool surface. Even if the bot is
-        # prompt-injected into trying, the tool refuses.
+        # Hard-gate: auto-seeded reminders are managed by operator-owned
+        # configuration, not by the agent tool surface.
         reminder = await fetch_reminder_by_id(self.ctx.database, args.reminder_id)
         if reminder is not None and reminder.get("auto_seed_key"):
             return ToolResult(
                 content=(
-                    f"reminder #{args.reminder_id} is an auto-seeded mandatory "
-                    f"loop ({reminder['auto_seed_key']}) and cannot be cancelled"
+                    f"reminder #{args.reminder_id} is managed by operator "
+                    f"configuration ({reminder['auto_seed_key']}) and cannot "
+                    "be cancelled through this tool"
                 ),
                 is_error=True,
             )

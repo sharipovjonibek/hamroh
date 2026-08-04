@@ -4,7 +4,7 @@ Brings up the four components in order:
 
 1. SQLite database (with migrations applied)
 2. Local MCP server on a random localhost port
-3. Claude Code subprocess via the CC worker
+3. Codex SDK runtime (or the legacy Claude worker)
 4. Engine + Telegram dispatcher
 
 Then sleeps until interrupted, at which point everything is torn down.
@@ -16,6 +16,7 @@ import asyncio
 import logging
 
 from .cc_worker import CcWorker, WorkerHooks
+from .codex_worker import CodexWorker
 from .config import Config
 from .scheduler.reminder_scheduler import _reminder_loop
 from .startup import (
@@ -23,19 +24,18 @@ from .startup import (
     _App,
     _attach_owner_log_notifier,
     _bootstrap_access,
-    _build_cc_spec,
+    _build_worker_spec,
     _build_dispatcher_and_engine,
     _make_on_cc_giveup,
     _make_on_cc_stale_session,
     _open_db_and_stores,
     _replay_unconsumed,
     _run_until_stopped,
-    _seed_default_reminders,
     _start_mcp_server,
 )
 from .helpers.logging_setup import setup_logging
 
-__all__ = ["main", "_seed_default_reminders"]
+__all__ = ["main"]
 
 log = logging.getLogger("hamroh")
 
@@ -60,7 +60,7 @@ async def _async_main() -> None:
             app.browser_manager.warm(),
             name="hamroh-browser-warm",
         )
-    spec = _build_cc_spec(config, plugins, app.mcp, stores)
+    spec = _build_worker_spec(config, plugins, app.mcp, stores)
     await _start_worker(app, ctx, spec)
     await _start_engine_and_dispatcher(app, stores, chat_titles, ctx)
     log.info("hamroh is live")
@@ -69,8 +69,10 @@ async def _async_main() -> None:
 
 
 async def _start_worker(app: _App, ctx, spec) -> None:
-    """Spawn the CC worker wired to the supervisor callbacks, then supervise."""
-    app.worker = CcWorker(
+    """Start the configured provider with shared lifecycle callbacks."""
+
+    worker_class = CodexWorker if app.config.provider == "codex" else CcWorker
+    app.worker = worker_class(
         spec,
         app.config,
         WorkerHooks(

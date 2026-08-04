@@ -38,9 +38,8 @@ from typing import Any
 
 from croniter import croniter
 
-#: Seed-key namespace for committed reminders. Chosen so it never matches the
-#: self-reflection key (``self-reflection-default``); the two seeders are blind
-#: to each other's rows.
+#: Seed-key namespace for reminders declared in ``default-reminders.json``.
+#: The reconciler only reads and changes rows within this namespace.
 KEY_PREFIX = "committed:"
 
 

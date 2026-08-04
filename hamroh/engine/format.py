@@ -68,7 +68,7 @@ def _format_one(message: ChatMessage, parents_xml: str = "") -> str:
 
 
 def format_messages_as_xml(messages: list[ChatMessage]) -> str:
-    """Render a batch of messages as the Claudir-style ``<msg>`` XML.
+    """Render a batch of messages as canonical ``<msg>`` XML.
 
     Pure / synchronous: no DB lookup, no reply-chain expansion. Used by
     tests and as a fallback when no database is wired.

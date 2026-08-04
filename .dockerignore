@@ -28,5 +28,5 @@ docs/
 # Tests (not needed in production image)
 tests/
 
-# Claude Code local state
-.claude/
+# Codex local state (authentication is mounted through a named volume)
+.codex/

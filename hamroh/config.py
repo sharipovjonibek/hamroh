@@ -81,11 +81,11 @@ class Config:
     #: mode also uses it to decide who can talk to the bot.
     #: Env var: ``HAMROH_OWNER_ID`` (required).
     owner_id: int
-    #: Which Claude model to use. Passed to ``claude --model``.
-    #: Env var: ``HAMROH_MODEL`` (required).
+    #: Which model to use. Empty means the Codex-recommended default.
+    #: Env var: ``HAMROH_MODEL`` (optional for Codex, required for Claude).
     model: str
-    #: How hard Claude thinks before answering. Passed to ``claude --effort``.
-    #: Env var: ``HAMROH_EFFORT`` (required, e.g. ``"high"``).
+    #: How hard the model thinks before answering.
+    #: Env var: ``HAMROH_EFFORT`` (default ``"high"``).
     effort: str
     #: Name or full path of the ``claude`` program to run.
     #: Env var: ``CLAUDE_CODE_BIN`` (default ``"claude"``).
@@ -96,18 +96,6 @@ class Config:
     #: root, not here — see ``memories_dir``.)
     #: Env var: ``HAMROH_DATA_DIR`` (default ``"./data"``).
     data_dir: Path
-    #: Whether the daily self-reflection loop runs at all. On by default
-    #: — set this to ``false`` to turn it off. While on, it's seeded at
-    #: startup and the bot can't cancel it (operator-only switch). While
-    #: off, no self-reflection reminder is seeded and any existing one is
-    #: cancelled.
-    #: Env var: ``HAMROH_SELF_REFLECTION_ENABLED`` (default ``True``).
-    self_reflection_enabled: bool
-    #: When the daily self-reflection task runs, if enabled. Standard cron
-    #: format, in UTC time. Only matters when ``self_reflection_enabled``.
-    #: Env var: ``HAMROH_SELF_REFLECTION_CRON`` (default ``"0 0 * * *"``,
-    #: which means midnight UTC every day).
-    self_reflection_cron: str
     #: How long to wait (in milliseconds) after a message before sending
     #: it to Claude. If more messages come in during this wait, they are
     #: bundled together into one turn. Set to ``0`` to send each message
@@ -209,6 +197,16 @@ class Config:
     #: Env var: ``HAMROH_LOG_TRANSCRIPT`` (``"compact"`` or ``"full"``).
     log_transcript: str
 
+    #: Runtime provider. ``codex`` uses the official Codex Python SDK and can
+    #: authenticate with a ChatGPT subscription. ``claude`` retains the
+    #: legacy Claude Code worker for existing deployments.
+    #: Env var: ``HAMROH_PROVIDER`` (default ``"codex"``).
+    provider: str = "codex"
+    #: Optional path to a Codex binary. Normally unset: the pinned Python SDK
+    #: supplies its matching runtime.
+    #: Env var: ``CODEX_BIN``.
+    codex_bin: str | None = None
+
     # Derived paths
     db_path: Path = field(init=False)
     #: The bot's memory folder: git-tracked ``memories/`` at the repo root, so
@@ -230,6 +228,10 @@ class Config:
     attachments_dir: Path = field(init=False)
     renders_dir: Path = field(init=False)
     log_dir: Path = field(init=False)
+    #: Private, persistent Codex auth/session state. This must never be
+    #: mounted from a developer's general ``~/.codex`` directory.
+    #: Env var: ``CODEX_HOME`` (default ``<data_dir>/codex``).
+    codex_home: Path = field(init=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "db_path", self.data_dir / "hamroh.db")
@@ -249,20 +251,23 @@ class Config:
         object.__setattr__(self, "attachments_dir", self.data_dir / "attachments")
         object.__setattr__(self, "renders_dir", self.data_dir / "renders")
         object.__setattr__(self, "log_dir", self.data_dir / "logs")
+        object.__setattr__(self, "codex_home", self.data_dir / "codex")
 
     @classmethod
     def from_env(cls) -> "Config":
+        provider = _choice("HAMROH_PROVIDER", "codex", ("codex", "claude"))
+        model = _env("HAMROH_MODEL", "") or ""
+        if provider == "claude" and not model:
+            raise RuntimeError(
+                "HAMROH_MODEL is required when HAMROH_PROVIDER=claude"
+            )
         cfg = cls(
             telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
             owner_id=int(_required("HAMROH_OWNER_ID")),
-            model=_required("HAMROH_MODEL"),
-            effort=_required("HAMROH_EFFORT"),
+            model=model,
+            effort=_env("HAMROH_EFFORT", "high") or "high",
             claude_code_bin=_env("CLAUDE_CODE_BIN", "claude") or "claude",
             data_dir=Path(_env("HAMROH_DATA_DIR", "./data") or "./data").resolve(),
-            self_reflection_enabled=_bool("HAMROH_SELF_REFLECTION_ENABLED", True),
-            self_reflection_cron=(
-                _env("HAMROH_SELF_REFLECTION_CRON", "0 0 * * *") or "0 0 * * *"
-            ),
             debounce_ms=_int("HAMROH_DEBOUNCE_MS", 0),
             rate_limit_per_min=_int("HAMROH_RATE_LIMIT_PER_MIN", 20),
             attachment_max_bytes=_int("HAMROH_ATTACHMENT_MAX_BYTES", 20_000_000),
@@ -279,6 +284,8 @@ class Config:
             log_transcript=_choice(
                 "HAMROH_LOG_TRANSCRIPT", "compact", ("compact", "full")
             ),
+            provider=provider,
+            codex_bin=_env("CODEX_BIN"),
         )
         cls._apply_env_path_overrides(cfg)
         return cfg
@@ -309,6 +316,11 @@ class Config:
         memories_override = _env("HAMROH_MEMORIES_DIR")
         if memories_override:
             object.__setattr__(cfg, "memories_dir", Path(memories_override).resolve())
+        codex_home_override = _env("CODEX_HOME")
+        if codex_home_override:
+            object.__setattr__(
+                cfg, "codex_home", Path(codex_home_override).resolve()
+            )
 
     @classmethod
     def for_test(cls, data_dir: Path) -> "Config":
@@ -324,8 +336,6 @@ class Config:
             effort="high",
             claude_code_bin="claude",
             data_dir=data_dir.resolve(),
-            self_reflection_enabled=False,
-            self_reflection_cron="0 0 * * *",
             debounce_ms=1000,
             rate_limit_per_min=20,
             attachment_max_bytes=20_000_000,
@@ -340,6 +350,7 @@ class Config:
             browser_headless=True,
             log_level="INFO",
             log_transcript="compact",
+            provider="claude",
         )
         cls._override_test_paths(cfg, data_dir.resolve())
         return cfg
@@ -366,3 +377,7 @@ class Config:
         self.attachments_dir.mkdir(parents=True, exist_ok=True)
         self.renders_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.codex_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # ``mkdir(mode=...)`` is affected by umask and does not tighten an
+        # existing directory. Codex auth tokens require an owner-only home.
+        self.codex_home.chmod(0o700)

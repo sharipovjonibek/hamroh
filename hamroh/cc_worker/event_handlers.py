@@ -211,9 +211,8 @@ class CcEventHandlerMixin:
         )
         if tool_name in USER_VISIBLE_TOOLS:
             self._current_turn.user_visible_action = True
-        # StructuredOutput is the definitive turn-end signal. Claudir
-        # confirmed: the action lives in the tool_use event's input
-        # field, NOT in the result event payload.
+        # StructuredOutput is the definitive turn-end signal: the action lives
+        # in the tool_use event's input field, NOT in the result event payload.
         if tool_name == "StructuredOutput" and isinstance(tool_input, dict):
             try:
                 self._current_turn.control = ControlAction.model_validate(tool_input)

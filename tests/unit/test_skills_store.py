@@ -37,11 +37,11 @@ _VALID_FRONTMATTER = textwrap.dedent(
 
 def _make_store(tmp_path: Path) -> SkillsStore:
     root = tmp_path / "skills"
-    (root / "self-reflection").mkdir(parents=True)
-    (root / "self-reflection" / "SKILL.md").write_text(
-        _VALID_FRONTMATTER.format(name="self-reflection")
+    (root / "example-skill").mkdir(parents=True)
+    (root / "example-skill" / "SKILL.md").write_text(
+        _VALID_FRONTMATTER.format(name="example-skill")
     )
-    (root / "self-reflection" / "README.md").write_text("readme\n")
+    (root / "example-skill" / "README.md").write_text("readme\n")
     (root / "another").mkdir()
     (root / "another" / "SKILL.md").write_text(
         _VALID_FRONTMATTER.format(name="another")
@@ -62,14 +62,14 @@ def _make_store(tmp_path: Path) -> SkillsStore:
 def test_list_returns_only_dirs_with_valid_skill_md(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     names = [f.name for f in store.list()]
-    assert sorted(names) == ["another", "self-reflection"]
+    assert sorted(names) == ["another", "example-skill"]
     assert "docs-only" not in names
 
 
 def test_list_includes_description_from_frontmatter(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     files = {f.name: f for f in store.list()}
-    assert "SkillsStore test suite" in files["self-reflection"].description
+    assert "SkillsStore test suite" in files["example-skill"].description
 
 
 def test_list_skips_skill_with_invalid_frontmatter(tmp_path: Path) -> None:
@@ -77,7 +77,7 @@ def test_list_skips_skill_with_invalid_frontmatter(tmp_path: Path) -> None:
     # Break 'another' by stripping frontmatter entirely.
     (store.root / "another" / "SKILL.md").write_text("# No frontmatter here\n")
     names = [f.name for f in store.list()]
-    assert names == ["self-reflection"]  # 'another' silently dropped
+    assert names == ["example-skill"]  # 'another' silently dropped
 
 
 def test_list_skips_skill_with_name_mismatch(tmp_path: Path) -> None:
@@ -87,7 +87,7 @@ def test_list_skips_skill_with_name_mismatch(tmp_path: Path) -> None:
         _VALID_FRONTMATTER.format(name="totally-different")
     )
     names = [f.name for f in store.list()]
-    assert names == ["self-reflection"]
+    assert names == ["example-skill"]
 
 
 def test_list_on_missing_root_returns_empty(tmp_path: Path) -> None:
@@ -102,17 +102,17 @@ def test_list_on_missing_root_returns_empty(tmp_path: Path) -> None:
 
 def test_read_returns_skill_content_including_frontmatter(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
-    text = store.read("self-reflection")
+    text = store.read("example-skill")
     assert text.startswith("---")
-    assert "name: self-reflection" in text
-    assert "# self-reflection" in text
+    assert "name: example-skill" in text
+    assert "# example-skill" in text
 
 
 def test_read_rejects_invalid_frontmatter(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
-    (store.root / "self-reflection" / "SKILL.md").write_text("# No frontmatter\n")
+    (store.root / "example-skill" / "SKILL.md").write_text("# No frontmatter\n")
     with pytest.raises(SkillsError, match="frontmatter"):
-        store.read("self-reflection")
+        store.read("example-skill")
 
 
 def test_read_unknown_skill_raises(tmp_path: Path) -> None:
@@ -128,30 +128,30 @@ def test_read_unknown_skill_raises(tmp_path: Path) -> None:
 
 def test_frontmatter_missing_name_rejected(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
-    (store.root / "self-reflection" / "SKILL.md").write_text(
+    (store.root / "example-skill" / "SKILL.md").write_text(
         "---\ndescription: No name field\n---\n\nbody\n"
     )
     with pytest.raises(SkillsError, match="'name'"):
-        store.read("self-reflection")
+        store.read("example-skill")
 
 
 def test_frontmatter_missing_description_rejected(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
-    (store.root / "self-reflection" / "SKILL.md").write_text(
-        "---\nname: self-reflection\n---\n\nbody\n"
+    (store.root / "example-skill" / "SKILL.md").write_text(
+        "---\nname: example-skill\n---\n\nbody\n"
     )
     with pytest.raises(SkillsError, match="'description'"):
-        store.read("self-reflection")
+        store.read("example-skill")
 
 
 def test_frontmatter_name_format_rejected(tmp_path: Path) -> None:
     # Uppercase is a spec violation.
     store = _make_store(tmp_path)
-    (store.root / "self-reflection" / "SKILL.md").write_text(
-        "---\nname: Self-Reflection\ndescription: bad name case.\n---\n"
+    (store.root / "example-skill" / "SKILL.md").write_text(
+        "---\nname: Example-Skill\ndescription: bad name case.\n---\n"
     )
     with pytest.raises(SkillsError, match="name"):
-        store.read("self-reflection")
+        store.read("example-skill")
 
 
 def test_frontmatter_leading_hyphen_rejected(tmp_path: Path) -> None:
@@ -177,11 +177,11 @@ def test_frontmatter_consecutive_hyphens_rejected(tmp_path: Path) -> None:
 def test_frontmatter_description_too_long(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     huge = "x" * 1100  # spec cap is 1024
-    (store.root / "self-reflection" / "SKILL.md").write_text(
-        f"---\nname: self-reflection\ndescription: {huge}\n---\n"
+    (store.root / "example-skill" / "SKILL.md").write_text(
+        f"---\nname: example-skill\ndescription: {huge}\n---\n"
     )
     with pytest.raises(SkillsError, match="description exceeds"):
-        store.read("self-reflection")
+        store.read("example-skill")
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +198,7 @@ def test_read_rejects_traversal(tmp_path: Path) -> None:
 def test_read_rejects_nested_name(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     with pytest.raises(SkillsError, match="single directory"):
-        store.read("self-reflection/SKILL.md")
+        store.read("example-skill/SKILL.md")
 
 
 def test_read_rejects_absolute_path(tmp_path: Path) -> None:
@@ -227,10 +227,10 @@ def test_read_truncates_at_cap(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     # Write a skill with valid frontmatter but a giant body.
     body = "y" * (MAX_SKILL_BYTES + 100)
-    (store.root / "self-reflection" / "SKILL.md").write_text(
-        f"---\nname: self-reflection\ndescription: big body.\n---\n{body}"
+    (store.root / "example-skill" / "SKILL.md").write_text(
+        f"---\nname: example-skill\ndescription: big body.\n---\n{body}"
     )
-    text = store.read("self-reflection")
+    text = store.read("example-skill")
     assert "[truncated" in text
 
 
@@ -247,7 +247,7 @@ def test_render_skills_index_lists_each_skill(tmp_path: Path) -> None:
     block = render_skills_index(store)
 
     assert block.startswith("# Available skills"), "block must carry the header"
-    assert "- **self-reflection** — A test skill" in block, "self-reflection listed"
+    assert "- **example-skill** — A test skill" in block, "example skill listed"
     assert "- **another** — A test skill" in block, "another listed"
     assert "skill_read" in block, "block must tell the agent how to load a body"
 
@@ -297,13 +297,13 @@ def test_write_rejects_over_cap(tmp_path: Path) -> None:
         store.write("big", content)
 
 
-def test_write_allows_self_reflection(tmp_path: Path) -> None:
-    # No skill is off-limits: the bot may overwrite self-reflection too,
+def test_write_allows_existing_skill(tmp_path: Path) -> None:
+    # No skill is off-limits: the bot may overwrite an existing skill,
     # subject only to the normal read-before-write gate.
     store = _make_store(tmp_path)
-    content = _VALID_FRONTMATTER.format(name="self-reflection")
-    store.read("self-reflection")
-    assert store.write("self-reflection", content) == len(content.encode("utf-8"))
+    content = _VALID_FRONTMATTER.format(name="example-skill")
+    store.read("example-skill")
+    assert store.write("example-skill", content) == len(content.encode("utf-8"))
 
 
 def test_overwrite_requires_prior_read(tmp_path: Path) -> None:

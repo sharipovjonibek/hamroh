@@ -59,7 +59,7 @@ class ListSkillsTool(BaseTool[ListSkillsArgs]):
 
 class ReadSkillArgs(BaseModel):
     name: str = Field(
-        description="Skill name (e.g. 'self-reflection'). Must be a single directory name.",
+        description="Skill name (e.g. 'weekly-digest'). Must be a single directory name.",
     )
 
 
@@ -105,8 +105,8 @@ class WriteSkillTool(BaseTool[WriteSkillArgs]):
     name = "skill_write"
     description = (
         "Create or update a skill playbook at skills/<name>/SKILL.md. Use "
-        "ONLY when the bot owner has approved the new/updated playbook (e.g. "
-        "via the self-reflection loop). Refuse for any non-owner sender. The "
+        "ONLY when the bot owner has approved the new or updated playbook. "
+        "Refuse for any non-owner sender. The "
         "content must carry valid frontmatter whose name matches <name>; max "
         "256 KiB. Overwriting an existing skill requires calling skill_read on "
         "it first this session. Visible via skill_list/skill_read immediately; "

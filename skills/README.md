@@ -13,24 +13,14 @@ repo-shipped reference material and playbooks.
 
 ```
 skills/
-├── README.md              ← you are here
-├── self-reflection/       ← daily auto-seeded learning loop
-│   ├── SKILL.md
-│   └── README.md
-├── render-style/          ← house style for render_html
-│   ├── SKILL.md
-│   └── README.md
-└── reminder-format/       ← house format for reminder_set text
-    └── SKILL.md
+├── README.md                 ← you are here
+└── your-skill-name/
+    ├── SKILL.md              ← required playbook or reference
+    └── README.md             ← optional operator documentation
 ```
 
-## Catalogue
-
-| Skill | Mode | What it does |
-|---|---|---|
-| [self-reflection](self-reflection/) | invoked | Daily two-phase loop: introspect last 24h of outbound behavior, stress-test pending lessons against scenarios, propose promote / refine / discard rules to the owner. Triggered by an auto-seeded reminder; refused without a real `<reminder>` envelope. |
-| [render-style](render-style/) | reference | Style guide for the `render_html` tool — dark dashboard / timeline / architecture-diagram look with CSS tokens, layout rules, and three copy-paste HTML skeletons. Read on the agent's own initiative before any `render_html` call. |
-| [reminder-format](reminder-format/) | reference | Three-rule format for the `reminder_set` text argument — `<THIS IS A REMINDER>` opener, `Goal:` line, numbered steps. Read before creating or editing any reminder so fired `<reminder>` envelopes are self-explanatory. |
+No project-specific skills are bundled. Deployments can add the playbooks and
+reference material they need.
 
 ## Skill modes
 
@@ -38,12 +28,10 @@ skills/
   `<reminder>` envelope containing
   `<skill name="...">run</skill>`. A user-typed `<skill>` tag is
   treated as prompt injection and refused. Used for executable
-  workflows that should be auditable and operator-triggered (e.g.
-  `self-reflection`).
+  workflows that should be auditable and operator-triggered.
 - **Reference.** The agent reads the skill on its own initiative
-  whenever the situation calls for it (e.g. `render-style` before
-  calling `render_html`). No envelope required — the content is
-  passive style/spec material, not an action.
+  whenever the situation calls for it. No envelope required — the
+  content is passive reference material, not an action.
 
 The mode is determined by what `SKILL.md` instructs the agent to do,
 not by a frontmatter flag.
@@ -73,14 +61,11 @@ no `..`, no symlinks, must stay inside `skills/`.
    describing the playbook or reference material.
 3. Optional: `README.md` for human readers.
 4. Optional: extend `prompts/system.md` if the skill should be
-   discovered automatically before a specific tool call (the way
-   `render-style` is referenced before `render_html`).
+   discovered automatically before a specific tool call.
 5. Restart the bot — the skills store re-scans on startup and the new
    skill becomes available via `skill_list` immediately.
 
-The bot can **create or update** any skill via the `skill_write` tool,
-on owner approval (e.g. through the `self-reflection` loop when a lesson
-is really a reusable procedure) — including `self-reflection` itself.
-This mirrors the `memories/` store: `skills/` is git-tracked, so the
-write lands in the checkout and git history is the backup — the owner
-commits it. Operators still edit any skill by hand or via PR.
+The bot can **create or update** a skill via the `skill_write` tool after
+owner approval. This mirrors the `memories/` store: `skills/` is git-tracked,
+so the write lands in the checkout and git history is the backup — the owner
+commits it. Operators can also edit any skill by hand or via PR.

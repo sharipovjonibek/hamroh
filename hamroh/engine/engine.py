@@ -2,7 +2,7 @@
 
 This is the heart of hamroh. The dispatcher calls :meth:`Engine.submit`
 for every allowed inbound message. The engine batches them with a 1-second
-debounce, formats them as XML the same way Claudir does, and ships them to
+debounce, formats them as XML message envelopes, and ships them to
 the CC worker. While CC is processing a turn, additional messages are
 shovelled through the inject channel so they land in the same turn rather
 than triggering a new one.
@@ -46,6 +46,7 @@ AsyncHook = Callable[[], Awaitable[None]]
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..cc_worker import CcWorker, TurnResult
+    from ..codex_worker import CodexWorker
     from ..db.database import Database
 
 log = logging.getLogger("hamroh.engine")
@@ -187,7 +188,7 @@ class EngineOptions:
 class Engine(TypingIndicatorMixin):
     def __init__(
         self,
-        worker: "CcWorker",
+        worker: "CcWorker | CodexWorker",
         config: Config,
         options: EngineOptions = EngineOptions(),
     ) -> None:
@@ -221,6 +222,7 @@ class Engine(TypingIndicatorMixin):
         self._is_processing = asyncio.Event()
         self._debounce_task: asyncio.Task[None] | None = None
         self._control_task: asyncio.Task[None] | None = None
+        self._pending_kick_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
 
     # ------------------------------------------------------------------
@@ -240,6 +242,12 @@ class Engine(TypingIndicatorMixin):
             self._control_task.cancel()
             try:
                 await self._control_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if self._pending_kick_task and not self._pending_kick_task.done():
+            self._pending_kick_task.cancel()
+            try:
+                await self._pending_kick_task
             except (asyncio.CancelledError, Exception):
                 pass
         await self._stop_typing()
@@ -419,16 +427,50 @@ class Engine(TypingIndicatorMixin):
                 return
             batch = self._pending
             self._pending = []
-            self._turn_callbacks.extend(self._pending_callbacks)
+            callbacks = self._pending_callbacks
             self._pending_callbacks = []
+        xml = await format_messages_with_context(batch, self._db)
+        accepted = await self._worker.inject(xml)
+        if accepted is False:
+            # Codex may finish between submit() observing an active turn and
+            # turn/steer reaching app-server. Preserve the batch as unconsumed
+            # and let the normal next-turn path deliver it exactly once.
+            async with self._lock:
+                self._pending = batch + self._pending
+                self._pending_callbacks = callbacks + self._pending_callbacks
+            self._ensure_pending_kick()
+            return
+        self._turn_callbacks.extend(callbacks)
         self._turn.awaiting_reply = self._turn.awaiting_reply or _batch_awaits_reply(
             batch
         )
-        xml = await format_messages_with_context(batch, self._db)
-        await self._worker.inject(xml)
         await self._mark_consumed(batch)
         self._log_hot_path("inject", batch, {m.chat_id for m in batch})
         await self._rearm_typing({m.chat_id for m in batch})
+
+    def _ensure_pending_kick(self) -> None:
+        """Keep a requeued batch moving once the current/runtime turn clears."""
+
+        if self._pending_kick_task is None or self._pending_kick_task.done():
+            self._pending_kick_task = asyncio.create_task(
+                self._kick_pending_when_ready(), name="hamroh-pending-kick"
+            )
+
+    async def _kick_pending_when_ready(self) -> None:
+        while not self._stop.is_set():
+            async with self._lock:
+                has_pending = bool(self._pending)
+            if not has_pending:
+                return
+            worker_ready = bool(getattr(self._worker, "is_running", True))
+            if not self._is_processing.is_set() and worker_ready:
+                try:
+                    await self._kick()
+                except Exception:
+                    log.exception("failed to start requeued AI turn; retrying")
+                else:
+                    return
+            await asyncio.sleep(0.25)
 
     async def _rearm_typing(self, new_chats: set[int]) -> None:
         """Re-show "typing…" for chats whose follow-up was injected mid-turn.
@@ -492,6 +534,7 @@ class Engine(TypingIndicatorMixin):
         else:
             await self._deliver_text_to_chats("\n\n".join(result.text_blocks))
         self._turn.active_chats.clear()
+        self._ensure_pending_kick()
         await self._fire_turn_callbacks()
 
     async def _deliver_text_to_chats(self, text: str) -> None:
@@ -563,7 +606,7 @@ class Engine(TypingIndicatorMixin):
         a reminder injected into a turn that crashed before CC consumed it
         would be silently lost (#22).
         """
-        log.error("⚠️ Claude Code crashed mid-turn and is restarting: %s", exc)
+        log.error("⚠️ AI runtime crashed mid-turn and is restarting: %s", exc)
         self._is_processing.clear()
         await self._stop_typing()
         if self._turn_callbacks:
@@ -627,8 +670,19 @@ class Engine(TypingIndicatorMixin):
           poisoned state.
         Neither path kicks ``_pending`` — the subprocess is mid-respawn.
         """
-        if result.aborted_reason == "session-reset":
-            log.info("turn aborted: session reset requested by owner")
+        if result.aborted_reason != "tool-error-limit":
+            if result.aborted_reason == "session-reset":
+                log.info("turn aborted: session reset requested by owner")
+            else:
+                log.error(
+                    "⚠️ The AI turn was interrupted before completion (%s). "
+                    "Please resend the last message.",
+                    result.aborted_reason,
+                )
+                if result.text_blocks:
+                    await self._deliver_text_to_chats(
+                        "\n\n".join(result.text_blocks)
+                    )
             await self._fail_turn_callbacks()
             self._turn.active_chats.clear()
             return
@@ -671,7 +725,12 @@ class Engine(TypingIndicatorMixin):
         await self._notify_error_to_chats(f"{notice}\n\nDetails:\n{detail}")
         self._turn.active_chats.clear()
         await self._fire_turn_callbacks()
-        await self.reset_session()
+        try:
+            await self.reset_session()
+        except Exception:
+            # A transport failure during reset is handed to the worker's
+            # supervisor. Keep the control loop alive so it can recover.
+            log.exception("failed to reset AI session after API error")
 
     async def _prepare_api_error_reset(self) -> str:
         """One-shot poison guard + digest stash for the api-error reset.
@@ -688,14 +747,14 @@ class Engine(TypingIndicatorMixin):
                 "restored digest preceded this api_error; next session starts plain"
             )
             return (
-                "⚠️ Claude rejected that request and the turn failed. "
+                "⚠️ The AI runtime rejected that request and the turn failed. "
                 "I've started a completely fresh session — the recent recap "
                 "could not be carried over (it may itself have caused the "
                 "failure). Please rephrase and resend."
             )
         await self.stash_restore_context("api-error")
         return (
-            "⚠️ Claude rejected that request and the turn failed. "
+            "⚠️ The AI runtime rejected that request and the turn failed. "
             "I've started a fresh session and will carry a short recap of "
             "the recent conversation into it. Please rephrase and resend."
         )
@@ -714,10 +773,12 @@ class Engine(TypingIndicatorMixin):
 
         if result.aborted_reason is not None:
             await self._handle_aborted_turn(result)
+            self._ensure_pending_kick()
             return
 
         if result.api_error:
             await self._handle_api_error_turn(result)
+            self._ensure_pending_kick()
             return
 
         action = result.control.action if result.control else None
@@ -731,6 +792,7 @@ class Engine(TypingIndicatorMixin):
 
         if result.dropped_text and action != "skip":
             await self._handle_dropped_text(result)
+            self._ensure_pending_kick()
             return
 
         if action == "heartbeat" and (

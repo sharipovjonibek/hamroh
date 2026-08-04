@@ -10,20 +10,18 @@ The parts of hamroh:
 
 - Custom MCP tools: Telegram messaging (text/reply/edit/delete/reactions/polls), memory, chat history, web search/fetch
 - Vision + media: read inbound photos/docs/PDFs, render HTML and LaTeX to PNG, send photos back
-- Browser automation: drive a real headless Chromium for pages `WebFetch` can't reach (live network, stateful session)
-- Self-reasoning loop: after every response (reason: stop)
-- Memory: per person, group, instructions, learnings 
+- Browser automation: drive a real headless Chromium for JS-heavy and stateful pages (live network, stateful session)
+- Structured turn control: every response ends with an explicit action
+- Memory: persistent notes organized by person, group, or topic
 - Reminders (one-shot + cron-recurring)
 - Agent skills
 - plugins.json to extend with external MCPs
 - access.json for group and DM access with different access policy.
-- Self-reflection and self-evolving loop  
-  - A daily self-reflection pass reviews the bot's own mistakes and proposes durable rules for owner approval.
-  - The owner can edit the bot's persona from a DM; every edit takes a timestamped backup first.
-- Error handling 
-  - when tool, mcp, CC session raises an error - model retries 3 times max instead of constantly replying 
-  - The `claude` subprocess is supervised: crashes respawn with exponential backoff and the conversation resumes where it left off.
-  - If the model writes a reply without sending it, the harness nudges it until the reply is actually delivered.
+- Project rules: the owner can append deployment-specific instructions from a DM; every edit takes a timestamped backup first.
+- Error handling
+  - Tool, MCP, and model-turn failures are bounded instead of retrying forever.
+  - The official Codex SDK/app-server is supervised: transport failures reconnect with exponential backoff and the persistent thread resumes.
+  - If the model writes a reply without sending it, the engine sends a corrective turn so the reply is actually delivered.
   - If the API rejects a turn outright, the bot says so and respawns a fresh session automatically.
   - A circuit breaker aborts a turn after repeated tool errors instead of letting it spin for minutes.
 
@@ -31,7 +29,7 @@ The parts of hamroh:
 ## Table of contents
 
 - [Highlights](#highlights)
-- [What gets passed to `claude`](#what-gets-passed-to-claude)
+- [What gets passed to Codex](#what-gets-passed-to-codex)
 - [Full configuration](#full-configuration)
 - [How it works (in detail)](#how-it-works-in-detail)
 - [Known limitations](#known-limitations)
@@ -40,7 +38,6 @@ The parts of hamroh:
 - [Memory](#memory)
 - [Rendered visuals](#rendered-visuals)
 - [Browser automation](#browser-automation)
-- [Self-reflection skill](#self-reflection-skill)
 - [Agent skills](#agent-skills)
 - [Reminders](#reminders)
 - [Run your own agent](#run-your-own-agent)
@@ -51,37 +48,33 @@ The parts of hamroh:
 - [Manual end-to-end checklist](#manual-end-to-end-checklist)
 - [Repo layout](#repo-layout)
 
-## What gets passed to `claude`
+## What gets passed to Codex
 
-hamroh runs Claude inside a long-lived
-`claude --print --input-format stream-json` process and limits what Claude
-can do with three flags. `--tools` is an **exclusive** allow-list over
-Claude Code's built-in tools — anything not on it is unreachable by
-construction (not merely un-auto-approved), which is what keeps native
-`Skill`, stray built-ins, and other dead-ends off. `--allowedTools` /
-`--disallowedTools` then handle permission auto-approval and a
-belt-and-braces deny list. By default the bot has its own MCP tools (in
-`hamroh/tools/`, served by a local MCP server) plus a fixed built-in set:
-`WebFetch`, `WebSearch`, `StructuredOutput` (the turn-end tool), the
-MCP-discovery tools (`ToolSearch`, `List`/`ReadMcpResourceTool`,
-`WaitForMcpServers`), and the task-checklist tools (`TaskCreate`,
-`TaskGet`, `TaskList`, `TaskUpdate`). The local server is registered with
-`alwaysLoad: true` so its tools are always in the model's context — never
-deferred behind Claude Code's ToolSearch (which made the bot "forget"
-`telegram_send_message` existed). Requires Claude Code ≥ 2.1.121.
+Hamroh uses the official `openai-codex` Python SDK. One SDK client owns a
+long-lived Codex app-server and one persistent thread. For each turn the worker
+sends the XML message batch, reasoning effort, model override (when set),
+Codex sandbox, and Hamroh's JSON output schema. The base and project prompts,
+skills/memory indexes, and exact `mcp__hamroh__<tool>` inventory are composed
+once as developer instructions when the thread starts or resumes.
 
-The exact callable name of every reachable tool is also rendered into the
-system prompt as a `# Your tools` block (see `render_tools_index()` in
-`hamroh/cc_worker/spec.py`), so the model copies names instead of guessing
-them — hamroh tools `mcp__hamroh__`-prefixed, built-ins bare.
+The local FastMCP server is attached through the thread's isolated Codex
+config. It is `required`, and its `enabled_tools` are exactly the tools left
+after `builtin_tools_disabled` filtering. External MCP prefixes or exact tool
+names from `plugins.json` are translated to Codex server configuration; see
+[tools.md](tools.md). Live web search is enabled. Shell execution, filesystem
+writes, and multi-agent work remain off until their tool groups are enabled.
+Every turn denies interactive approvals, and full host access is unsupported.
+
+The SDK app-server starts through a minimal `env -i` environment. It receives
+only runtime path/locale values plus the dedicated `CODEX_HOME`; it does not
+inherit the Telegram token or external-MCP credentials from Hamroh's process.
 
 The toggle source of truth is [`plugins.json`](../plugins.json) at
 the repo root:
 
-* `tool_groups` — flips for the dangerous CC built-ins. `bash`
-  unlocks `Bash` / `PowerShell` / `Monitor`; `code` unlocks `Edit` /
-  `Write` / `Read` / `NotebookEdit` / `Glob` / `Grep` / `LSP`;
-  `subagents` unlocks `Agent`.
+* `tool_groups` — maps `bash` and `code` to Codex shell features;
+  `code` also selects the `workspace-write` sandbox. `subagents` maps to
+  Codex's multi-agent feature.
 * `mcps` — list of external MCP servers to spawn. Three transports
   supported: `stdio`, `http`, `sse`. `${VAR}` references pull
   credentials from `.env`. The shipped `plugins.json.example`
@@ -90,12 +83,13 @@ the repo root:
   entry to plug in any other MCP server.
 * `builtin_tools_disabled` — names of hamroh built-in tools to
   hide (e.g. `telegram_create_poll`, `render_html`). Filtered at MCP
-  registration time, never advertised to Claude.
+  registration time and omitted from Codex `enabled_tools`.
 * `skills_disabled` — names of skill directories to hide.
 
-The full per-tool list and the schema reference live in
-[tools.md](tools.md); the loader is `hamroh/plugins.py`; the
-allow/deny argv is assembled in `hamroh/cc_worker/spec.py`.
+The full per-tool list and schema reference live in [tools.md](tools.md); the
+loader is `hamroh/plugins.py`, and `hamroh/startup.py` assembles the Codex
+configuration. `hamroh/cc_worker/` remains only for
+`HAMROH_PROVIDER=claude` compatibility.
 
 ## Full configuration
 
@@ -118,22 +112,23 @@ into a `Config` field.
 |---|---|---|---|
 | `TELEGRAM_BOT_TOKEN` | yes | — | from @BotFather |
 | `HAMROH_OWNER_ID` | yes | — | your numeric Telegram user id |
-| `HAMROH_MODEL` | yes | — | which Claude model to use (e.g. `claude-sonnet-4-6`); passed to `--model` |
-| `HAMROH_EFFORT` | yes | — | how hard Claude thinks; passed to `--effort` (one of `low`, `medium`, `high`, `max`) |
-| `HAMROH_DATA_DIR` | no | `./data` | SQLite, memories, access config, raw CC logs |
+| `HAMROH_PROVIDER` | no | `codex` | `codex` uses the official SDK and ChatGPT login; `claude` selects the legacy worker. |
+| `HAMROH_MODEL` | no for Codex | — | Empty uses Codex's recommended subscription default. Required for the legacy Claude provider. |
+| `HAMROH_EFFORT` | no | `high` | Codex reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, or `xhigh` (model support varies). |
+| `CODEX_BIN` | no | SDK-bundled | Optional full path to a compatible Codex binary; normally leave unset so the pinned SDK supplies its runtime. |
+| `CODEX_HOME` | no | `<data>/codex` | Private Codex auth/session home. Compose sets `/var/lib/codex` on a named volume. Never point it at a shared operator `~/.codex`. |
+| `CLAUDE_CODE_BIN` | legacy only | `claude` | CLI used only with `HAMROH_PROVIDER=claude`; not installed by the default image. |
+| `HAMROH_DATA_DIR` | no | `./data` | SQLite, attachments, renders, logs, and persistent thread id. |
 | `HAMROH_ACCESS_PATH` | no | repo-root `access.json` | override where `access.json` lives (mainly so the e2e harness can point at a temp file). |
-| `CLAUDE_CODE_BIN` | no | `claude` | name or full path of the `claude` program |
-| `HAMROH_DEBOUNCE_MS` | no | `0` | wait this long after a message before sending it to Claude. Messages that arrive during the wait are bundled into one turn. `0` = send right away. |
+| `HAMROH_DEBOUNCE_MS` | no | `0` | wait this long after a message before starting a model turn. Messages arriving during the wait are bundled. |
 | `HAMROH_RATE_LIMIT_PER_MIN` | no | `20` | max DMs per minute from one user. The owner is not limited. Group chats are not limited. |
 | `HAMROH_ATTACHMENT_MAX_BYTES` | no | `20000000` | largest inbound photo/document (20 MB) the bot will download and read; bigger files are refused with a marker. |
 | `HAMROH_BROWSER_HEADLESS` | no | `true` | run the automation Chromium headless. Set `false` only for local debugging (visible window). |
-| `HAMROH_SELF_REFLECTION_ENABLED` | no | `true` | master switch for the daily self-reflection loop (on by default). When off, the auto-seeded reflection reminder is removed at boot. |
-| `HAMROH_SELF_REFLECTION_CRON` | no | `0 0 * * *` | when the daily self-reflection task runs (UTC cron). Default: midnight UTC. Only used when the loop is enabled. |
-| `HAMROH_LIVENESS_TIMEOUT_SECONDS` | no | `600` | if Claude is mid-turn and goes silent (no output, no tool activity) for this many seconds, the bot kills it and starts it again. |
+| `HAMROH_LIVENESS_TIMEOUT_SECONDS` | no | `600` | if the runtime is mid-turn and silent (no output or tool activity) this long, interrupt/reconnect it. |
 | `HAMROH_LIVENESS_POLL_SECONDS` | no | `30` | how often the watcher wakes up to check the timeout above. |
-| `HAMROH_TOOL_ERROR_MAX_COUNT` | no | `10` | how many failed tool calls in one turn trip the breaker: too many (within the window below, with no success in between) aborts the turn and restarts the Claude subprocess. Stops the bot from looping forever on a broken tool. |
-| `HAMROH_TOOL_ERROR_WINDOW_SECONDS` | no | `600` | if errors keep arriving for this many seconds after the first one in a turn, end the turn — even below the count above. |
-| `HAMROH_CRASH_BACKOFF_BASE` | no | `2` | seconds to wait before the first restart after Claude crashes. Doubles after each crash, up to `CRASH_BACKOFF_CAP`. |
+| `HAMROH_TOOL_ERROR_MAX_COUNT` | legacy Claude | `10` | failed-tool breaker threshold in `cc_worker`. |
+| `HAMROH_TOOL_ERROR_WINDOW_SECONDS` | legacy Claude | `600` | time window for the legacy failed-tool breaker. |
+| `HAMROH_CRASH_BACKOFF_BASE` | no | `2` | seconds before the first runtime reconnect; doubles after each crash up to the cap. |
 | `HAMROH_CRASH_BACKOFF_CAP` | no | `64` | maximum wait between restarts. Once the wait reaches this, it stops growing. |
 | `HAMROH_CRASH_LIMIT` | no | `10` | how many crashes within `CRASH_WINDOW_SECONDS` count as "too many". When reached, the bot tells the owner (crashes are the operator's to handle, so waiting chats stay silent), then exits — and something outside (systemd, docker) is expected to restart the whole bot. |
 | `HAMROH_CRASH_WINDOW_SECONDS` | no | `600` | the time window used for `CRASH_LIMIT`. Only crashes from the last X seconds are counted. |
@@ -153,13 +148,14 @@ See [Access control](#access-control).
 
 ## How it works (in detail)
 
-Four parts run inside one Python process:
+Four application parts run together; Codex's SDK-managed app-server is the
+child runtime:
 
 ```
-Telegram listener  →  Engine (buffer + send/inject)  →  Claude worker  →  claude process
-                                  │                                              │
-                                  ▼                                              ▼
-                               SQLite                                   MCP server (HTTP, localhost:0)
+Telegram listener  →  Engine (buffer + send/inject)  →  Codex worker  →  SDK/app-server
+                                  │                                        │
+                                  ▼                                        ▼
+                               SQLite                             MCP server (HTTP, localhost:0)
 ```
 
 1. **Telegram listener** (`hamroh/telegram_io/`). Uses
@@ -170,28 +166,26 @@ Telegram listener  →  Engine (buffer + send/inject)  →  Claude worker  →  
 2. **Engine** (`hamroh/engine/`). Holds the pending message buffer,
    the debounce timer, the mid-turn processing flag, and the inject path.
    Bundles messages that arrive close together. If a new message comes in
-   while Claude is mid-reply, the engine sends it via `worker.inject()` so
+   while the model is mid-reply, the engine sends it via `worker.inject()` so
    the running turn picks it up. If a turn ends with text but no
    `telegram_send_message` call (we call this "dropped text"), the engine sends a
-   corrective `<error>...</error>` block to nudge Claude into using the
+   corrective `<error>...</error>` block to nudge the model into using the
    tool.
-3. **Claude worker** (`hamroh/cc_worker/`). Starts the `claude`
-   process and watches it. Reads stream-json events from stdout, saves
-   stderr for diagnostics, stores `session_id` so a restart can resume
-   the same conversation, and starts Claude again after a crash —
-   waiting longer each time (`CRASH_BACKOFF_BASE`=2s up to
-   `CRASH_BACKOFF_CAP`=64s, with a give-up after `CRASH_LIMIT`=10
-   crashes in `CRASH_WINDOW_SECONDS`=600s).
+3. **Codex worker** (`hamroh/codex_worker/`). Starts/resumes a persistent SDK
+   thread, streams typed item and completion notifications, translates them to
+   the shared `TurnResult`, and steers mid-turn messages. It saves the thread
+   ID atomically, interrupts wedges, and reconnects the app-server with
+   exponential backoff after transport failure.
 4. **MCP server** (`hamroh/mcp_server.py`). A FastMCP server on a
    random port on `127.0.0.1`. It finds every `BaseTool` subclass in
    `hamroh/tools/` and registers it. It writes a small JSON config
-   file so Claude can connect via `--mcp-config`.
+   registry whose URL and enabled tools are attached to the Codex thread.
 
 ## Known limitations
 
 ### One turn at a time
 
-The engine handles **one Claude turn at a time**. While Claude is busy
+The engine handles **one model turn at a time**. While Codex is busy
 with a long task (a code review, a big GitLab search, a complex Jira
 query), the engine waits for it to finish. Messages from other chats
 sit in the buffer and only go through after the current turn ends.
@@ -280,22 +274,22 @@ hides the `/` menu from non-owners.
                              queued); in-memory only, resets on restart
 /resume                      Re-enable message forwarding
 /kill                        SIGTERM (graceful shutdown)
-/reset_session               Clear the saved Claude session id and restart —
+/reset_session               Replace the saved provider session/thread —
                              fresh context, chat history and memories kept
 /health                      Pause status, last send, reminder state,
                              rate-limit notices, current turn duration,
                              queued messages
 /audit                       Recent tool failures, backups, memory footprint
 /logs [N]                    Tail the JSON log file (last 50 lines, or N)
-/usage                       Relay Claude Code's own usage report (subscription
-                             session + weekly rate limits, with reset times) by
-                             shelling out to `claude --print /usage`
+/usage                       Show active Codex model/effort and commands for
+                             login/rate-limit inspection. Legacy Claude relays
+                             its CLI usage report.
 ```
 
 Application logs are written two ways: human-readable text to the console
 (captured by `docker logs`) and a structured JSON line per record to
 `data/logs/hamroh.log` (rotated daily, 7 days kept). Each JSON record carries
-`ts`, `level`, `component` (derived from the logger — `dispatcher`, `cc_worker`,
+`ts`, `level`, `component` (derived from the logger — `dispatcher`, `codex_worker`,
 `tx`, `mcp`, `reminder`, …), `logger`, and `msg`. The root level is set by
 `HAMROH_LOG_LEVEL` (default `INFO`); `/logs` tails this file from Telegram.
 
@@ -340,25 +334,6 @@ Every memory is named by its **full path** starting with `memories/` — a bare
 `memory_search`. See [`memories/README.md`](../memories/README.md) for the
 full how-to.
 
-### Learning — `self/learnings.md`
-
-Mistakes, corrections, and patterns the bot wants to carry forward live
-in `memories/self/learnings.md`. Conventions (enforced by the system
-prompt):
-
-- **On correction, same-turn capture.** When a user corrects the bot, or
-  it notices mid-conversation it got something wrong, it writes a new
-  `## <date> — <topic>` entry before the turn ends. Don't batch, don't
-  defer — the signal evaporates fast.
-- **`[pending]` marker** in the h2 header flags an entry as a candidate
-  for promotion to a durable rule in `prompts/project.md`. Plain headers
-  (no marker) are pure history. The daily self-reflection skill picks up
-  `[pending]` entries and stress-tests them (see below). Status
-  transitions: `[pending]` → `[promoted]` / `[discarded]` / `[refined]`.
-- **`**Proposed rule:**` line** accompanies every `[pending]` entry so
-  the skill knows what rule text to consider. Without it, the skill asks
-  the operator to re-file the entry.
-
 ## Rendered visuals
 
 Two tools turn structured data into a Telegram photo:
@@ -373,18 +348,16 @@ Two tools turn structured data into a Telegram photo:
   a file from `data/renders/` as an inline Telegram photo. Path-locked
   to the renders root with the same hardening as `memory_read`.
 
-The agent's `render_html` calls follow the house style in
-[`skills/render-style/`](../skills/render-style/) — three skeletons
-(dashboard, timeline, architecture diagram) the agent reads via
-`skill_read render-style` before composing HTML. Tokens are dark-navy
-with semantic colors (green/blue/red/amber/purple/cyan/gray).
+When composing HTML, keep all CSS and JavaScript inline, choose a layout
+that matches the data, and make labels readable at the requested image
+size. The render tool does not impose a project-specific visual style.
 
 Playwright + Chromium are pre-installed in the Docker image. For local
 runs: `uv sync && uv run playwright install chromium`.
 
 ## Browser automation
 
-For pages `WebFetch` can't reach (JS-rendered, multi-step, form-driven),
+For JS-rendered, multi-step, or form-driven pages,
 the bot drives a real headless Chromium. Unlike `render_html` — which
 runs network-blocked — the browser tools have **live network access**,
 so this is the path for interacting with the open web. Private/internal
@@ -402,43 +375,12 @@ The full tool list (navigate/history, interact, read, capture) is in
 [tools.md](tools.md#browser). All sixteen are on by default; disable any
 by name via `builtin_tools_disabled` in `plugins.json`.
 
-## Self-reflection skill
-
-A daily two-phase loop that drives self-improvement. Triggered by an
-auto-seeded recurring reminder (default midnight UTC every day; override
-with `HAMROH_SELF_REFLECTION_CRON`):
-
-- **Phase A — introspect.** Bot reads the last 24h of outbound messages
-  + their reactions via `database_query`, applies a checklist (over-long
-  replies, ping-rule deviations, negative reactions, repeated rewrites,
-  tone/language mismatches), and writes up to 3 candidate lessons into
-  `learnings.md` with `[pending]` markers. This catches drift the user
-  hasn't called out yet.
-- **Phase B — process.** Bot reads every `[pending]` entry (Phase-A's
-  fresh ones plus anything from the on-correction rule above),
-  stress-tests each against 10-20 hypothetical scenarios, scores fit
-  (<30% discard, 60-85% promote, 85%+ overreach → refine), DMs the
-  owner a numbered proposal, waits for approval, and on approval calls
-  the instruction-edit tools to append rules to `project.md`.
-
-**Mandatory loop.** The reminder is protected on two layers:
-- `reminder_cancel` refuses to cancel rows with `auto_seed_key` set (so
-  a prompt-injected bot can't stop the loop).
-- `_seed_default_reminders` in `__main__.py` re-seeds on every startup
-  if no pending row exists — cancelling or deleting via SQL loses only
-  until the next container restart.
-
-The playbook lives at `skills/self-reflection/SKILL.md`. See the
-[Agent skills](#agent-skills) section below for how skill invocation
-works and how to add more.
-
 ## Agent skills
 
 Skills are operator-curated multi-step playbooks stored in the top-level
 `skills/<name>/SKILL.md` format, following the
 **[Agent Skills specification](https://agentskills.io/specification)**.
-They ship with the repo (versioned in git) and are read-only from the
-bot's perspective.
+They are versioned in git, and each deployment chooses which skills to add.
 
 Each SKILL.md must begin with YAML frontmatter containing at least
 `name` (matching the directory) and `description` (what the skill does
@@ -450,6 +392,8 @@ Tools:
 - `skill_list` — enumerate available skills as name + description pairs
   (the spec's progressive-disclosure metadata surface).
 - `skill_read(name)` — load the full SKILL.md playbook.
+- `skill_write(name, content)` — create or update a skill after explicit owner
+  approval.
 
 **Invocation.** A skill is triggered by a reminder whose text body is
 `<skill name="X">run</skill>`. The reminder loop wraps that in a
@@ -495,22 +439,14 @@ leading/trailing/consecutive hyphens). Optional frontmatter fields per
 spec: `license`, `compatibility`, `metadata`, `allowed-tools`.
 
 The SkillsStore auto-discovers any first-level directory that contains a
-`SKILL.md`. No code changes needed unless you want it to run on a
-schedule:
+`SKILL.md`; no code changes are needed. To run an invoked skill on a schedule,
+add a recurring entry to `default-reminders.json` whose text is
+`<skill name="your-skill-name">run</skill>`. See [Reminders](#reminders) for
+the file format and lifecycle.
 
-1. To make the skill fire daily/weekly, add an auto-seeded reminder in
-   `_seed_default_reminders` (`hamroh/__main__.py`) with a unique
-   `auto_seed_key` (e.g. `"your-skill-default"`).
-2. Add a migration if you need new DB columns/tables.
-3. Remember: auto-seeded reminders are protected by default —
-   `reminder_cancel` refuses them, and the seed hook re-creates them if
-   missing on restart. That's intentional; skills that should be
-   interruptible shouldn't use the auto_seed_key path.
-
-The playbook itself is markdown the bot reads and executes step by step.
-See `skills/self-reflection/SKILL.md` as a worked example. Keep the
-playbook self-contained: preconditions check, the data the skill should
-read, the decisions it should make, and the tools it should call.
+The playbook itself is markdown the bot reads and executes step by step. Keep
+it self-contained: document preconditions, the data the skill should read, the
+decisions it should make, and the tools it should call.
 
 ## Reminders
 
@@ -532,7 +468,7 @@ fire happens during an active turn, the synthetic reminder message is
 queued and runs as soon as the current turn ends.
 
 A reminder row is only marked `sent` (or its cron advanced) once the
-CC subprocess has actually consumed the turn. If CC crashes or wedges
+model worker has actually consumed the turn. If the runtime crashes or wedges
 mid-turn, the row stays `pending` and the next 60s loop tick re-fires
 it — without this, a wedged subprocess would silently lose the
 reminder.
@@ -601,8 +537,8 @@ How it behaves:
   it, and so does setting `"enabled": false` — the entry stays in the file
   as an off switch, and flipping it back to `true` seeds the reminder again.
 - **Source of truth is the file.** Because each row carries an
-  `auto_seed_key`, the agent cannot cancel these from chat (same gate as
-  the self-reflection loop) — change the file and restart instead.
+  `auto_seed_key`, the agent cannot cancel these from chat — change the file
+  and restart instead.
 - **Recurring only.** A one-shot would re-fire on every restart once
   sent, so only cron reminders are accepted here; for a one-off, ask the
   bot in chat (it uses `reminder_set`).
@@ -620,10 +556,10 @@ memories, config — in files that bind-mount over the image at runtime.
 
 ```
 my-agent/                    # your private repo
-├── framework/               # git submodule → github.com/Rustam-Z/hamroh
+├── framework/               # git submodule → github.com/sharipovjonibek/hamroh
 ├── Dockerfile         
 ├── docker-compose.yml       # runs framework/, mounts the files below
-├── .env                     # bot token, owner id, model, secrets — gitignore this
+├── .env                     # bot token, owner id, plugin secrets — gitignore this
 ├── prompts/
 │   ├── system.md            # seeded from framework/ — required
 │   └── project.md           # bot name, language, personality
@@ -638,11 +574,12 @@ Set it up once:
 
 ```bash
 git init my-agent && cd my-agent
-git submodule add https://github.com/Rustam-Z/hamroh framework
-cp framework/.env.example .env             # fill TELEGRAM_BOT_TOKEN, HAMROH_OWNER_ID, model
+git submodule add https://github.com/sharipovjonibek/hamroh framework
+cp framework/.env.example .env             # fill TELEGRAM_BOT_TOKEN + HAMROH_OWNER_ID
+chmod 600 .env
 cp framework/prompts/project.md.example prompts/project.md
 cp framework/prompts/system.md prompts/system.md         # required — re-copy after a framework bump
-cp -R framework/skills/. skills/                         # keep the built-ins; add your own too
+cp -R framework/skills/. skills/                         # seed the directory; add your own skills
 cp framework/plugins.json.example plugins.json
 cp framework/access.json.example access.json
 cp framework/default-reminders.json.example default-reminders.json
@@ -654,24 +591,42 @@ cp framework/default-reminders.json.example default-reminders.json
 services:
   hamroh:
     build: ./framework
+    image: my-agent:local
     env_file: .env
+    environment:
+      CODEX_HOME: /var/lib/codex
     volumes:
       - ./data:/app/data
+      - codex-home:/var/lib/codex
       - ./prompts:/app/prompts
-      - ./skills:/app/skills:ro
-      - ./memories:/app/memories:ro
+      - ./skills:/app/skills
+      - ./memories:/app/memories
       - ./plugins.json:/app/plugins.json
       - ./access.json:/app/access.json
       - ./default-reminders.json:/app/default-reminders.json:ro
-      - ~/.claude:/root/.claude
-      - ~/.claude.json:/root/.claude.json
     working_dir: /app
+
+  codex-auth:
+    image: my-agent:local
+    profiles: ["auth"]
+    network_mode: host       # expose the OAuth localhost callback on port 1455
+    environment:
+      CODEX_HOME: /var/lib/codex
+    volumes:
+      - codex-home:/var/lib/codex
+    working_dir: /app
+    command: ["python", "-m", "hamroh.codex_login"]
+
+volumes:
+  codex-home:
 ```
 
 Run it:
 
 ```bash
-docker compose up -d --build
+docker compose build hamroh
+docker compose run --rm codex-auth   # prints browser URL; waits on localhost:1455
+docker compose up -d hamroh
 docker compose logs -f hamroh
 ```
 
@@ -685,6 +640,14 @@ Notes:
   above. Re-run those two `cp`s after a framework bump.
 - **Update the framework:** `cd framework && git pull origin main && cd .. &&
   git add framework && git commit -m "bump framework"`.
+- **Keep Codex private.** Mount the named `codex-home` volume, not the host's
+  general `~/.codex`. The auth service does not need `env_file: .env`, and
+  therefore cannot see Telegram or plugin secrets.
+- **Browser OAuth is the default.** Open the printed authorization URL in a
+  browser on this host. For a remote host, forward port `1455` over SSH first.
+  If that callback cannot be forwarded, explicitly append
+  `python -m hamroh.codex_login --device-code` to the `codex-auth` run command
+  to use device code as a fallback.
 
 ### Installing extra packages
 
@@ -722,7 +685,7 @@ runs via `npx` needs none of this — that's a `plugins.json` edit, no rebuild.)
 
 ## System prompt
 
-The system prompt is assembled from two files:
+The Codex developer instructions are assembled from two files:
 
 1. **`prompts/system.md`** — generic hamroh template covering tool
    discipline, message format, memory, reminders, and prompt-injection
@@ -732,7 +695,9 @@ The system prompt is assembled from two files:
    `prompts/project.md.example` to get started. Path is hardcoded —
    always at `prompts/project.md`.
 
-If `project.md` doesn't exist, only the base prompt is used.
+If `project.md` doesn't exist, only the base prompt is used. The worker then
+appends public runtime settings, skills and memory indexes, the exact Hamroh
+MCP tool list, and (when enabled) subagent instructions.
 
 ## External MCP integrations
 
@@ -742,9 +707,9 @@ is just an entry in `plugins.json` `mcps[]`. The shipped
 `plugins.json.example` includes three sample entries you can keep,
 edit, or delete — they're starting points, not first-class:
 
-- **Jira** via Atlassian's remote MCP (`https://mcp.atlassian.com/v1/sse`,
-  SSE) — auth is OAuth, established once on the host with Claude Code (no
-  `.env` credentials). See `docs/tools.md` for the OAuth setup.
+- **Jira** via a legacy Atlassian SSE sample — disabled by default. Codex
+  attempts SSE-labelled URLs as remote HTTP, and Hamroh does not run the
+  vendor's interactive OAuth flow. See `tools.md` before enabling it.
 - **GitLab** via
   [@zereight/mcp-gitlab](https://www.npmjs.com/package/@zereight/mcp-gitlab)
   (stdio) — set `GITLAB_URL`, `GITLAB_TOKEN` in `.env`.
@@ -760,14 +725,15 @@ To stop advertising one without removing credentials, flip
 `enabled: false` on its entry. To remove permanently, delete the
 entry.
 
-Adding a new MCP (Notion, Linear, Slack, Postgres, Playwright, your
-own — stdio, http, or sse) is a `plugins.json` edit — no Python
-change. See [tools.md](tools.md) for the schema and per-transport
-shape.
+Adding a new MCP (Notion, Linear, Slack, Postgres, Playwright, your own —
+stdio or streamable HTTP) is a `plugins.json` edit, not a Python change. Exact
+`mcp__server__tool` allow entries become Codex `enabled_tools`; a server prefix
+means every tool from that server. Legacy `sse` remains a compatibility label.
+See [tools.md](tools.md) for the schema and transport details.
 
 ## Monitoring & observability
 
-Hamroh gives you **four complementary windows** into what the bot is
+Hamroh gives you **three complementary windows** into what the bot is
 doing. Pick whichever fits the moment.
 
 ### 1. The live tagged log (the running terminal)
@@ -785,11 +751,12 @@ structured tag lines on top of the usual lifecycle messages:
 | `[TX]` | outbound `telegram_send_message` / `telegram_reply_to_message` |
 | `[EDIT]` / `[DEL]` / `[REACT]` | outbound edits, deletions, reactions |
 
-**Claude Code subprocess transcript** (`hamroh.cc` logger):
+**Model worker transcript** (`hamroh.cc` logger; the historical `CC` tag is
+kept so existing log tooling still works):
 
 | Tag | Meaning |
 |---|---|
-| `[CC.user]` | the XML batch we just shipped to CC's stdin |
+| `[CC.user]` | the XML batch sent to the configured model worker |
 | `[CC.text]` | a text block the assistant emitted (rare; signals dropped-text) |
 | `[CC.tool→]` | the assistant called a tool (with args + tool_use_id) |
 | `[CC.tool✓]` / `[CC.tool✗]` | a tool returned (success / error) |
@@ -811,82 +778,30 @@ The `httpx`/`mcp` per-poll noise is silenced by default. To bring it
 back for debugging, comment the relevant lines in
 `hamroh/startup.py:_setup_logging()`.
 
-### 2. The replayable session viewer (`hamroh.scripts.trace`)
+### 2. Persistent Codex thread and rotating application log
 
-Claude Code persists every CC session as a JSONL file at
-`~/.claude/projects/<encoded-project-dir>/<session_id>.jsonl`, where
-`<encoded-project-dir>` is the absolute project path with every
-non-alphanumeric character replaced by `-` (e.g. `/home/alice/hamroh`
-→ `-home-alice-hamroh`). `hamroh.scripts.trace` computes this
-automatically from the cwd; override with `CLAUDE_PROJECT_DIR` if
-needed. This is the **complete conversation log** — every user
-envelope, every assistant message, every tool_use, every tool_result,
-every thinking block.
+`data/session_id` contains the current persistent Codex thread ID. It is
+written atomically as soon as a thread starts or resumes; it is an opaque
+recovery handle, not a transcript file. Authentication and Codex-owned state
+live under the private `CODEX_HOME` (`/var/lib/codex` in Compose). Do not inspect
+or share that directory as an observability interface because it contains
+OAuth material.
 
-Render it as a human-readable transcript:
+Hamroh's structured rotating log lives under `data/logs/` and is the supported
+record of SDK events translated by the worker. The legacy
+`hamroh.scripts.trace` and `data/cc_logs/` raw subprocess captures apply only
+when `HAMROH_PROVIDER=claude`; the Codex SDK path does not write Claude session
+JSONL or a Claude stdout/stderr wire capture.
 
-```bash
-# List every session in the project dir; the bot's file is marked
-uv run python -m hamroh.scripts.trace --list
-
-# Replay the bot's session (resolved via data/session_id, NOT
-# "most-recent-file" — important if you also have your own Claude Code
-# session running in the same cwd)
-uv run python -m hamroh.scripts.trace
-
-# Replay one specific session
-uv run python -m hamroh.scripts.trace --session 87f472fa-5e1a-48d6-bddc-824efca1fea5
-
-# Tail the bot's running session live (refreshes every 0.5s)
-uv run python -m hamroh.scripts.trace --follow
-
-# Truncate huge text blocks
-uv run python -m hamroh.scripts.trace --max 200
-
-# Escape hatch: pick the most-recently-modified JSONL regardless of owner
-uv run python -m hamroh.scripts.trace --latest --follow
-```
-
-The default picker reads `data/session_id` first, then falls back to
-fingerprinting (a session is "the bot's" iff its first user event
-begins with the engine's `<msg ...>` XML envelope). This stops the
-renderer from accidentally tailing your own Claude Code session that
-happens to be the most recently modified file in the same project
-directory.
-
-The renderer is **read-only** and never touches the running hamroh
-process — totally safe to run in a second terminal while the bot is
-live.
-
-### 3. The raw wire-stream capture (`data/cc_logs/`)
-
-Independent from Claude Code's own session JSONL, hamroh also
-captures the raw bytes coming out of the CC subprocess on stdout/stderr
-to:
-
-```
-data/cc_logs/<session_id>.stream.jsonl   # one event per line, pre-parse
-data/cc_logs/<session_id>.stderr.log     # timestamped stderr lines
-```
-
-This is the **wire log** (what came out of the subprocess) as opposed
-to the *conversation log* (what was in the model's context). The two
-overlap mostly but the wire log also captures `result` events, `ping`
-frames, and any malformed JSON the parser would otherwise drop. Useful
-when debugging parser bugs or weird stream artifacts.
+Useful checks:
 
 ```bash
-# Live wire stream
-tail -f data/cc_logs/*.stream.jsonl | jq -c .
-
-# CC's stderr (rate-limit notices, retries, warnings)
-tail -f data/cc_logs/*.stderr.log
+make auth-status
+docker compose logs -f hamroh
+ls -l data/session_id data/logs/
 ```
 
-Capture is on by default. Files rotate per session id, append across
-respawns of the same session, and survive crashes.
-
-### 4. SQLite — auditable, queryable history
+### 3. SQLite — auditable, queryable history
 
 Everything that touches Telegram or any MCP tool is in
 `data/hamroh.db`. Useful one-liners:
@@ -917,32 +832,16 @@ sqlite3 data/hamroh.db \
 database — sqlglot-validated, capped at 100 rows. `database_get_recent_messages`
 returns the latest messages without writing SQL.
 
-### 5. Bonus — interactive replay (`claude --resume`)
-
-Drop into the bot's *exact* conversation state in a real Claude Code
-interactive session:
-
-```bash
-# Stop hamroh first, OR use --fork-session to branch safely
-claude --resume $(cat data/session_id)
-```
-
-You're now talking to Claude Code with the bot's full history loaded.
-Ask "why did you reply that way to message 591?" and you'll get its
-perspective on its own past turns. ⚠️ Don't run this on the same
-session id as a live hamroh process unless you pass `--fork-session`.
-
 ### Cheatsheet
 
 | You want to know… | Look at |
 |---|---|
 | Who said what to who right now | the foreground terminal (`[RX]`/`[TX]` lines) |
 | Which tools is it calling and why | the foreground terminal (`[CC.tool→]`/`[CC.done]` lines) |
-| The full story of a past conversation | `python -m hamroh.scripts.trace --session <sid>` |
-| Whether the parser is missing events | `data/cc_logs/<sid>.stream.jsonl` |
-| Whether CC is hitting rate limits | `data/cc_logs/<sid>.stderr.log` |
+| SDK/MCP lifecycle and model errors | `docker compose logs -f hamroh` and `data/logs/` |
+| Whether ChatGPT authentication is present | `make auth-status` |
+| Current resumable thread | `data/session_id` (identifier only) |
 | Aggregate stats / cross-session queries | `sqlite3 data/hamroh.db` |
-| What it would say *now* about its own history | `claude --resume $(cat data/session_id) --fork-session` |
 
 ## Security model
 
@@ -951,35 +850,30 @@ can talk to it, and they're not always trustworthy. The security model
 is enforced by code, not by hope, and tested in
 `tests/test_security_invariants.py`.
 
-- **No shell, no edits, no writes outside `memories/`, no general reads
-  outside `memories/`, no subagents — by default.** The CC subprocess is
-  spawned with an **exclusive** `--tools` built-in allow-list (`WebFetch`,
-  `WebSearch`, `StructuredOutput`, the MCP-discovery tools, and the
-  task-checklist tools) so every un-listed built-in — `Bash`, `Edit`,
-  `Agent`, native `Skill`, … — is unreachable by construction, not just
-  un-auto-approved. `--allowedTools mcp__hamroh,WebFetch,WebSearch`
-  auto-approves the surface and a belt-and-braces
-  `--disallowedTools Bash,PowerShell,Monitor,Edit,Write,Read,
-  NotebookEdit,Glob,Grep,LSP,Agent --strict-mcp-config` backs it up. Each
-  gated group flips on via `plugins.json` `tool_groups` (which extends the
-  `--tools` list); external-MCP tool advertisement follows from
-  `plugins.json` `mcps[]` entries whose `${VAR}` references resolve. The
-  forbidden flag `--dangerously-skip-permissions` is *never* passed; both
-  the argv builder and the spawn-time assertion refuse it. See
-  [tools.md](tools.md) for the full per-tool list and the `plugins.json`
-  schema.
-- **Web access (read-only).** `WebFetch` and `WebSearch` are
-  deliberately enabled so the agent can answer questions that need
-  fresh information. This is a real trade-off — see the next bullet.
+- **No shell, workspace writes, or subagents by default.** Codex starts with
+  shell/unified execution and multi-agent features disabled in an isolated
+  per-thread config. The sandbox is `read-only`; only `tool_groups.code`
+  raises it to `workspace-write`, and full host access is never selected.
+  Every turn uses `approval_mode=deny_all`, with a fail-closed handler for an
+  unexpected approval request. See [tools.md](tools.md).
+- **Private Codex identity and clean runtime environment.** Compose mounts a
+  named volume at `CODEX_HOME=/var/lib/codex`; it never mounts the operator's
+  general `~/.codex`. The auth helper does not load `.env`, and the worker
+  launches the app-server through `env -i`, so Telegram and plugin secrets do
+  not enter the model runtime's ambient environment. Explicit external-MCP
+  credentials still travel in that server's scoped Codex configuration.
+- **Web access.** Codex live web search is deliberately enabled so the agent
+  can answer questions that need fresh information. This is a real trade-off.
   The system prompt instructs the agent to refuse private/internal
   URLs (localhost, RFC1918, link-local, `.local`), but a determined
   prompt-injection could still get it to fetch one. **Do not deploy
   the bot on a host with sensitive internal endpoints reachable from
   the same network.**
 - **MCP namespace lockdown.** The local MCP server is registered as
-  `hamroh`, so every hamroh tool Claude sees is named
-  `mcp__hamroh__<x>`. The two web tools are Claude Code built-ins,
-  not MCP tools, so they show up unprefixed (`WebFetch`, `WebSearch`).
+  `hamroh`, marked required, and given the exact filtered `enabled_tools`.
+  Every local call is logged as `mcp__hamroh__<x>`. External prefixes/exact
+  names are validated before translation so a typo cannot silently widen a
+  server's surface. User-visible delivery checks both server and tool name.
 - **Memory writes with safety rails.** `memory_write` and
   `memory_append` exist, but are guarded by:
   - **Path traversal hardening** (no `..`, no absolute paths, no
@@ -996,8 +890,8 @@ is enforced by code, not by hope, and tested in
   module.
 - **No subprocess calls in tools.** AST scan rejects `subprocess.*`,
   `os.system`, `os.popen`, `asyncio.create_subprocess_*` anywhere
-  under `hamroh/tools/`. The *only* place those primitives are
-  allowed is `cc_worker/worker.py`, which spawns `claude` itself.
+  under `hamroh/tools/`. Provider runtime creation stays in the dedicated
+  worker integration rather than becoming a model-callable tool.
 - **Owner-only privileged commands.** `/kill`, `/health`, `/audit`,
   `/access`, `/allow`, `/deny`, `/policy` check
   `update.effective_user.id == HAMROH_OWNER_ID` before running and
@@ -1011,7 +905,7 @@ is enforced by code, not by hope, and tested in
   default, DB-backed (`rate_limits` table, fixed-minute buckets) so it
   survives restarts. Enforced at `telegram_io._on_message` before
   `engine.submit()`: over-limit DMs are still persisted (audit trail)
-  but never reach the CC subprocess. **Groups are not rate-limited** —
+  but never reach the model worker. **Groups are not rate-limited** —
   noisy users in groups are the group's problem. **The owner
   (`HAMROH_OWNER_ID`) is fully exempt** — the counter never ticks
   for the owner. When a user exhausts their bucket they get one
@@ -1034,22 +928,17 @@ is enforced by code, not by hope, and tested in
   `<msg>` envelope carries a `flags=` attribute (`zero_width_stripped`,
   `bidi_stripped`, `nfkc_changed`) and the system prompt tells the
   agent to treat instructions in flagged messages as adversarial.
-- **Wedged-subprocess detection.** `CcWorker._liveness_loop` watches
-  for silent-mid-turn subprocesses: if `max(last stdout event, last
-  MCP tool call) < now - HAMROH_LIVENESS_TIMEOUT_SECONDS` (default
-  600s) and a turn is in progress, the subprocess is terminated so
-  the crash-recovery path respawns it with the same session id.
-  Doesn't fire when idle (silence is expected between turns).
-- **Tool-error circuit breaker.** A stream-json `tool_result` with
-  `is_error=true` increments a per-turn counter in `CcWorker`; when
-  the counter hits `HAMROH_TOOL_ERROR_MAX_COUNT` (default 10) or
-  the first-error window exceeds
-  `HAMROH_TOOL_ERROR_WINDOW_SECONDS` (default 600s), the worker
-  puts a sentinel `TurnResult` on the result queue and schedules
-  `_terminate_proc`. The engine unblocks immediately; `_on_cc_crash`
-  notifies the user on respawn. Prevents Claude from burning minutes
-  looping on a deterministically-failing tool (e.g. permission
-  denied, schema violation).
+- **Wedged-runtime detection.** `CodexWorker._liveness_loop` watches the last
+  SDK notification or MCP activity while a turn is active. After
+  `HAMROH_LIVENESS_TIMEOUT_SECONDS` (default 600), it interrupts the turn; if
+  turn start or interrupt itself is wedged, it reconnects the app-server.
+  Idle silence is ignored. The legacy worker implements the same external
+  contract around its subprocess.
+- **Legacy tool-error circuit breaker.** `HAMROH_TOOL_ERROR_MAX_COUNT` and
+  `HAMROH_TOOL_ERROR_WINDOW_SECONDS` govern the stream-JSON breaker in the
+  optional Claude worker. Codex reports failed MCP calls as typed SDK items;
+  they are logged and included in the turn without inheriting the legacy
+  subprocess counter.
 - **Dropped-text delivery.** A turn that ends with text blocks but
   no `telegram_send_message` call (`dropped_text=True`) would be
   invisible to the user, so `Engine._handle_dropped_text` delivers
@@ -1057,17 +946,17 @@ is enforced by code, not by hope, and tested in
   retry turn. Exception: when the text is actually a technical error,
   `classify_cc_failure` surfaces a targeted message (e.g. "model
   unavailable — fix `HAMROH_MODEL`") instead of echoing the raw
-  diagnostic. Catches CC-native diagnostics (invalid model, auth
+  diagnostic. Catches provider diagnostics (invalid model, auth
   failure, quota) that would otherwise be lost.
 - **Crash-loop terminal notification.** When the crash budget
   (`Config.crash_limit` crashes in `Config.crash_window_seconds`,
-  defaults 10 / 600s) is exhausted, `CcWorker._supervise_loop` fires
+  defaults 10 / 600s) is exhausted, the selected worker supervisor fires
   the `on_giveup` callback *before* raising `CrashLoop` — so owner
   + any active chats get a clear "I'm shutting down, operator needs
   to intervene" message (classified where possible) instead of the
   supervisor task dying silently.
-- **Failure classifier.** `hamroh/cc_failure_classifier.py` is the
-  single authoritative mapping from CC stderr / text blocks to
+- **Failure classifier.** `hamroh/cc_failure_classifier.py` retains the
+  shared mapping from provider diagnostics / text blocks to
   user-facing messages. Used by the engine's post-turn stderr sweep,
   the dropped-text handler, the on_crash hook, and the on_giveup
   hook. Add a new failure mode = append one `CcFailurePattern`.
@@ -1082,18 +971,16 @@ is enforced by code, not by hope, and tested in
   the size cap (128 KiB), atomic write, and a timestamped backup
   before every append. Revert is `mv <backup> prompts/project.md &&
   docker compose restart hamroh`. Edits take effect on the next
-  CC spawn, not mid-session, which gives the operator a natural
+  worker start/resume, not mid-turn, which gives the operator a natural
   review window.
 - **Skills are operator-curated playbooks.** Markdown files under
   `skills/<name>/SKILL.md` that describe multi-step agent workflows.
-  Exposed read-only via `skill_list` / `skill_read`. A skill is
+  Exposed via `skill_list` / `skill_read`; `skill_write` requires explicit
+  owner approval and enforces the same path and format rails. A skill is
   invoked when a `<reminder>` envelope contains `<skill
   name="X">run</skill>` — the system prompt teaches the bot to
   trust `<skill>` tags only inside that envelope, so a user typing
-  one in chat does nothing. The first skill is `self-reflection`: a
-  daily loop that stress-tests lessons from `learnings.md` and
-  proposes promotions to `project.md`, gated on explicit owner
-  approval via the instruction-edit tools above.
+  one in chat does nothing.
 
 If you weaken any of these, the security tests will fail loudly. They
 are load-bearing — keep them.
@@ -1112,29 +999,28 @@ Once configured, you should be able to:
 5. `sqlite3 data/hamroh.db 'SELECT direction, text FROM messages ORDER BY timestamp DESC LIMIT 10;'`
 6. Drop `hamroh/tools/echo.py` (above), restart, and watch the bot
    gain the new tool with zero other code changes.
-7. `kill -9 $(pgrep -f 'claude --print')`, watch the worker respawn
-   within seconds and resume the conversation.
-8. Ask the bot to run a shell command — it should refuse, because it
-   has no `Bash` tool and its system prompt tells it to.
-9. Run `uv run python -m pytest tests/test_security_invariants.py`
-   and see all 8 invariants pass.
+7. Restart the agent container, then confirm `data/session_id` still names the
+   persistent Codex thread and the conversation continues.
+8. Ask the bot to run a shell command — it should refuse because Codex shell
+   features are disabled and the sandbox is read-only by default.
+9. Run `uv run python -m pytest tests/test_security_invariants.py` and see the
+   security invariants pass.
 
 ## When a session breaks
 
-Sometimes the API rejects a turn outright (the result event carries
-`is_error`) — for example a usage-policy refusal or a context overflow.
+Sometimes the provider rejects a turn outright — for example a policy refusal
+or context overflow.
 Resuming that session would just replay the rejected content and fail
 again, so the engine treats it as broken:
 
 1. It tells the affected chats that the turn failed and that a fresh
    session was started (previous conversation context is gone).
-2. It respawns `claude` with no `--resume` and deletes the persisted
-   session id in `data/session_id`, so a later restart can't resume
-   the broken session either.
+2. It resets the worker to a fresh persistent Codex thread and replaces the ID
+   in `data/session_id`, so a later restart cannot resume the broken thread.
 
-The session id normally lives in `data/session_id` (written on clean
-shutdown). To force a fresh session manually, send `/reset_session`,
-or delete that file while the bot is stopped.
+The thread ID lives in `data/session_id` and is written atomically when the
+thread starts, rather than only at shutdown. To force a fresh thread manually,
+send `/reset_session`, or delete that file while the bot is stopped.
 
 Recoverable failures — rate limit, auth, quota — do **not** trigger
 this. The session is fine there; a reset would only lose context. The
@@ -1147,20 +1033,21 @@ One file, four blocks. Edit and restart to apply.
 
 Tool groups (shell / code / subagents, off by default), external MCPs, and toggles to hide built-in tools or skills. A missing file boots locked-down; a malformed one crashes boot loudly. 
 
-- **`tool_groups`** — Claude Code's dangerous built-ins (shell / code editing / subagents). All off by default; flip to `true` to unlock.
+- **`tool_groups`** — Codex shell, workspace-write, and multi-agent feature
+  gates. All are off by default.
 - **`mcps`** — external MCP servers (GitHub, Jira, Linear, Notion, your own). One array entry per server, `stdio` / `http` / `sse`, credentials pulled from `.env` via `${VAR}` references — no Python needed.
 - **`builtin_tools_disabled`** — hamroh built-ins to hide from the agent (e.g. `telegram_create_poll`).
 - **`skills_disabled`** — skill directories under `skills/` to hide.
 
-A missing `plugins.json` boots locked-down (no integrations, no tool groups). A malformed file crashes boot loudly. Full schema, copy-paste examples, and per-MCP setup: [docs/tools.md](docs/tools.md).
+A missing `plugins.json` boots locked-down (no integrations, no tool groups). A malformed file crashes boot loudly. Full schema, copy-paste examples, and per-MCP setup: [tools.md](tools.md).
 
 
 ```jsonc
 {
-  "tool_groups": {           // dangerous Claude Code built-ins, all off by default
-    "bash":      false,      //   Bash, PowerShell, Monitor — shell execution
-    "code":      false,      //   Edit, Write, Read, NotebookEdit, Glob, Grep, LSP
-    "subagents": false       //   Agent — token-heavy, isolated context
+  "tool_groups": {           // Codex runtime capabilities, all off by default
+    "bash":      false,      // shell/unified execution, read-only sandbox
+    "code":      false,      // shell/unified execution + workspace-write
+    "subagents": false       // Codex multi-agent feature
   },
   "mcps": [                  // external MCP servers — stdio, http, or sse
     {                        //   stdio (local subprocess; auth via env)
@@ -1180,19 +1067,25 @@ A missing `plugins.json` boots locked-down (no integrations, no tool groups). A 
       "allowed_tools": ["mcp__linear"],
       "enabled": true
     }
-    // …Notion, Slack, Postgres, Playwright, your own — same shape; sse also supported
+    // …Notion, Slack, Postgres, Playwright, your own; sse is a legacy label
   ],
   "builtin_tools_disabled": [ // hamroh built-ins to hide from the agent
     // e.g. "telegram_create_poll", "telegram_stop_poll", "render_html", "render_latex", "telegram_send_photo"
   ],
   "skills_disabled": [       // skill directories under skills/ to hide
-    // e.g. "render-style"
+    // e.g. "example-skill"
   ]
 }
 ```
 
-- **Tool groups.** Claude Code's dangerous built-ins (shell / code edit / subagents). All off by default. Flip to `true` and restart to unlock.
-- **External MCPs.** Three transports supported, exactly as the [MCP spec](https://modelcontextprotocol.io) defines them: `stdio` (local subprocess, auth via `env`), `http` (remote streamable HTTP, auth via static `headers`), and `sse` (Server-Sent Events, same field shape as http). `${VAR}` references pull credentials from `.env`; if any required var is empty the MCP is silently skipped at boot. To stop advertising one without removing credentials, flip `"enabled": false`. Adding a new MCP (Linear, Notion, Slack, your own) is just a new array entry — no Python. Hamroh doesn't manage OAuth flows; supply an already-issued token via `${VAR}`.
+- **Tool groups.** Codex shell / workspace-write / multi-agent gates. All off
+  by default. Flip to `true` and restart to apply.
+- **External MCPs.** `stdio` uses a local command and explicit `env`; `http`
+  uses a remote URL and static `headers`; `sse` is translated as remote HTTP
+  with a warning. `${VAR}` references pull credentials from `.env`; an
+  unresolved entry is skipped. Hamroh does not run interactive OAuth flows.
+  Exact allow entries become Codex `enabled_tools`; a server prefix allows
+  that server's full surface.
 - **Built-in tool toggles.** Names of hamroh built-ins (e.g. `telegram_create_poll`, `render_latex`) you want hidden. Filtered at MCP registration — the agent literally can't see them. A typo crashes boot with the available list.
 - **Skill toggles.** Directory names under `skills/` to hide. The skill stays on disk but isn't listed or readable, so it can't be invoked.
 
@@ -1206,7 +1099,6 @@ hamroh/
 │   ├── README.md               # index of what's in docs/
 │   ├── documentation.md        # this file — full technical manual
 │   ├── deployment.md           # VPS + CD setup walkthrough
-│   └── reference-architectures.md  # Claudir / Anthropic plugin notes
 ├── Dockerfile
 ├── docker-compose.yml
 ├── plugins.json                # operator-edited capability config (gitignored)
@@ -1219,21 +1111,19 @@ hamroh/
 │   └── project.md.example      # template for project.md
 ├── skills/                     # agent skills (playbooks, shipped)
 │   ├── README.md               #   directory index + skill-mode notes
-│   ├── self-reflection/        # invoked-mode: daily reflection loop
-│   │   ├── SKILL.md            #     playbook the bot reads + follows
-│   │   └── README.md
-│   └── render-style/           # reference-mode: render_html style guide
-│       ├── SKILL.md            #     tokens + 3 HTML skeletons
-│       └── README.md
+│   └── <name>/                 #   deployment-specific skill
+│       ├── SKILL.md            #     required playbook or reference
+│       └── README.md           #     optional operator documentation
 ├── memories/                   # the bot's memory (git-tracked, addressed as memories/...; bot reads + writes, bind-mounted in Docker)
 │   └── README.md               #   how the memory store works
 ├── data/                       # gitignored
 │   ├── hamroh.db            # SQLite (messages, users, tool_calls, ...)
-│   ├── session_id              # CC session id for --resume
+│   ├── session_id              # persistent Codex thread id
 │   ├── attachments/            # inbound photos/docs the dispatcher saves
 │   ├── renders/                # outbound PNGs from render_html
 │   ├── prompt_backups/         # auto-backups before instruction_append writes
-│   └── cc_logs/                # raw CC stdout/stderr capture
+│   ├── logs/                   # rotating structured application log
+│   └── codex/                  # local CODEX_HOME (Compose uses a volume)
 ├── scripts/
 │   ├── sync-memories.sh        # rsync helper for server ↔ local sync
 │   └── prune-backups.sh        # archive stale prompt backups (keep newest 50)
@@ -1252,14 +1142,18 @@ hamroh/
 │   │   ├── engine.py           # debouncer, queue, inject, control loop
 │   │   ├── typing_indicator.py # "typing..." indicator state + refresh loop
 │   │   └── format.py           # inbound batch → <msg> XML with reply chains
-│   ├── cc_worker/
+│   ├── codex_worker/
+│   │   ├── worker.py           # official SDK/app-server lifecycle + events
+│   │   └── spec.py             # instructions/schema + SDK spawn spec
+│   ├── codex_login.py           # isolated ChatGPT browser-OAuth helper
+│   ├── cc_worker/                # optional legacy Claude provider
 │   │   ├── worker.py           # subprocess lifecycle + crash recovery + breaker
 │   │   ├── event_handlers.py   # stream-json event dispatch
 │   │   ├── raw_capture.py      # raw CC stdout/stderr capture files
 │   │   ├── spec.py             # spawn spec + locked-down argv assembly
 │   │   └── events.py           # TurnResult / CrashLoop dataclasses
-│   ├── cc_schema.py            # ControlAction JSON schema (flat — see §5.15)
-│   ├── cc_failure_classifier.py # CC stderr/text → user-facing message map
+│   ├── cc_worker/cc_schema.py   # shared ControlAction JSON schema
+│   ├── cc_worker/cc_failure_classifier.py # provider errors → messages
 │   ├── mcp_server.py           # FastMCP host + tool auto-discovery
 │   ├── storage/
 │   │   ├── path_safety.py      # shared traversal-hardened path resolver
@@ -1272,10 +1166,10 @@ hamroh/
 │   ├── input_normalizer.py     # strips Unicode obfuscation at the boundary
 │   ├── formatting.py           # markdown → Telegram HTML
 │   ├── rate_limiter.py
-│   ├── transcript.py           # [RX]/[TX]/[CC.*] log helpers
+│   ├── helpers/transcript.py   # [RX]/[TX]/[CC.*] log helpers
 │   ├── models.py
 │   ├── scripts/
-│   │   ├── trace.py            # CC session JSONL replay/follow renderer
+│   │   ├── trace.py            # legacy Claude session renderer
 │   │   └── validate_skills.py  # validate skills/ against the Agent Skills spec
 │   └── tools/
 │       ├── base.py             # BaseTool, ToolContext, Heartbeat

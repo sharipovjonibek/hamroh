@@ -122,11 +122,10 @@ class OwnerCommandsMixin:
     async def _cmd_reset_session(
         self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Owner-only: drop the CC session and respawn with a fresh context.
+        """Owner-only: drop the agent session and start with fresh context.
 
         The escape hatch for unbounded context growth — the worker
-        respawns Claude Code without ``--resume``, i.e. a fresh, empty
-        context. The bot itself stays up; chat history (SQLite) and
+        starts a fresh runtime thread. The bot itself stays up; chat history (SQLite) and
         memories (markdown) survive.
         """
         if not self._is_owner(update):
@@ -134,14 +133,23 @@ class OwnerCommandsMixin:
         if self.engine is None:
             return
         log.warning(
-            "/reset_session received from owner; respawning cc with a fresh session"
+            "/reset_session received from owner; starting a fresh AI session"
         )
         await self.engine.stash_restore_context("owner-reset")
-        await self.engine.reset_session()
+        try:
+            await self.engine.reset_session()
+        except Exception:
+            log.exception("owner-requested AI session reset failed")
+            await self._reply(
+                update,
+                "Session reset failed because the AI runtime is unavailable. "
+                "It will retry automatically; check /health and the logs.",
+            )
+            return
         try:
             await self._reply(
                 update,
-                "Session cleared — Claude restarted with a fresh context. "
+                "Session cleared — the AI runtime started with fresh context. "
                 "Chat history and memories are preserved; a short recap of "
                 "recent messages will be carried into the next turn.",
             )
@@ -153,13 +161,12 @@ class OwnerCommandsMixin:
     ) -> None:
         """Quick operational health readout — owner-only, DM or group.
 
-        Surfaces things that matter day-to-day: when the CC subprocess
-        last produced output, whether the self-reflection auto-seed
-        reminder is active, recent rate-limit hits.
+        Surfaces things that matter day-to-day: when the agent runtime
+        last produced output, recent rate-limit hits, and engine state.
         """
         if not self._is_owner(update):
             return
-        lines: list[str] = ["*hamroh health*"]
+        lines: list[str] = ["*Shahnoza health*"]
         status = "⏸ PAUSED (dropping messages)" if self._paused else "active"
         lines.append(f"- status: {status}")
         try:
@@ -170,7 +177,6 @@ class OwnerCommandsMixin:
             lines.append(f"- last bot send: `{last_tx}` UTC")
         except Exception as exc:
             lines.append(f"- last bot send: query error ({exc})")
-        lines.extend(await self._health_reminder_lines())
         try:
             row = await self.db.fetch_one(
                 "SELECT COUNT(*) AS c FROM rate_limits WHERE notice_sent = 1"
@@ -181,23 +187,6 @@ class OwnerCommandsMixin:
             lines.append(f"- rate-limit notices: query error ({exc})")
         lines.extend(self._health_engine_lines())
         await self._reply(update, "\n".join(lines), parse_mode="Markdown")
-
-    async def _health_reminder_lines(self) -> list[str]:
-        """Health section: state of the self-reflection auto-seed reminder."""
-        try:
-            row = await self.db.fetch_one(
-                "SELECT status, cron_expr, trigger_at FROM reminders "
-                "WHERE auto_seed_key = 'self-reflection-default' "
-                "ORDER BY id DESC LIMIT 1"
-            )
-        except Exception as exc:
-            return [f"- self-reflection reminder: query error ({exc})"]
-        if row is None:
-            return ["- self-reflection reminder: MISSING (will re-seed on restart)"]
-        return [
-            f"- self-reflection reminder: {row['status']} "
-            f"(cron `{row['cron_expr']}`, next `{row['trigger_at']}` UTC)"
-        ]
 
     def _health_engine_lines(self) -> list[str]:
         """Health section: current turn duration and queued-message count."""
@@ -219,7 +208,7 @@ class OwnerCommandsMixin:
         """
         if not self._is_owner(update):
             return
-        lines: list[str] = ["*hamroh audit*"]
+        lines: list[str] = ["*Shahnoza audit*"]
         lines += await self._audit_tool_failures()
         lines += self._audit_prompt_backups()
         lines += self._audit_memory_footprint()
@@ -287,16 +276,30 @@ class OwnerCommandsMixin:
             await self._reply(update, chunk)
 
     async def _cmd_usage(self, update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Relay Claude Code's own ``/usage`` output verbatim — owner-only.
+        """Show provider/account usage guidance — owner-only.
 
-        Runs a short-lived headless ``claude --print /usage`` and forwards its
-        text, so the bot shows exactly what Claude Code reports (subscription
-        session and weekly rate limits with reset times).
+        Claude retains its legacy headless report. Codex currently exposes the
+        full account limits in its interactive ``/usage`` view; the bot reports
+        the active runtime and the exact local commands to inspect it.
         """
         if not self._is_owner(update):
             return
-        output = await self._fetch_claude_usage()
+        output = (
+            await self._fetch_claude_usage()
+            if self.config.provider == "claude"
+            else self._codex_usage_help()
+        )
         await self._reply(update, output)
+
+    def _codex_usage_help(self) -> str:
+        model = self.config.model or "Codex recommended default"
+        return (
+            "Codex is the active runtime.\n"
+            f"Model: {model}\n"
+            f"Reasoning effort: {self.config.effort}\n\n"
+            "Run `make auth-status` to check the bot login. For current "
+            "ChatGPT/Codex rate limits, open Codex on the host and run `/usage`."
+        )
 
     async def _fetch_claude_usage(self) -> str:
         """Run ``claude --print /usage`` and return its text, or an error line."""
@@ -392,7 +395,7 @@ class OwnerCommandsMixin:
             BotCommand("health", "quick health readout"),
             BotCommand("audit", "recent failures, backups, memory footprint"),
             BotCommand("logs", "tail recent log lines: /logs [N]"),
-            BotCommand("usage", "Claude Code usage and rate limits"),
+            BotCommand("usage", "runtime and account usage"),
             BotCommand("access", "show access policy"),
             BotCommand("allow", "add to allowlist: /allow <user|group> <id>"),
             BotCommand("deny", "remove from allowlist: /deny <user|group> <id>"),
@@ -400,7 +403,7 @@ class OwnerCommandsMixin:
             BotCommand("pause", "drop inbound messages until /resume"),
             BotCommand("resume", "re-enable message forwarding"),
             BotCommand("kill", "stop the bot"),
-            BotCommand("reset_session", "fresh Claude session (history kept)"),
+            BotCommand("reset_session", "fresh AI session (history kept)"),
         ]
         try:
             await self.application.bot.set_my_commands(
