@@ -8,6 +8,8 @@ their own ``Config`` without touching environment variables.
 from __future__ import annotations
 
 import os
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -69,6 +71,32 @@ def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
     return value
 
 
+DEFAULT_AGENT_NAME = "Assistant"
+
+
+def agent_name_from_env() -> str:
+    """Return the deployment's validated, human-readable agent name."""
+
+    value = (_env("AGENT_NAME", DEFAULT_AGENT_NAME) or DEFAULT_AGENT_NAME).strip()
+    if not value:
+        raise RuntimeError("AGENT_NAME must not be blank")
+    if len(value) > 80:
+        raise RuntimeError("AGENT_NAME must be at most 80 characters")
+    if any(unicodedata.category(char) == "Cc" for char in value):
+        raise RuntimeError("AGENT_NAME must be a single printable line")
+    return value
+
+
+def agent_name_slug(value: str) -> str:
+    """Return a stable ASCII identifier derived from a display name."""
+
+    ascii_name = (
+        unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
+    )
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_name.casefold()).strip("-")
+    return slug[:64] or "agent"
+
+
 @dataclass(frozen=True)
 class Config:
     """All settings the bot uses at runtime."""
@@ -76,6 +104,9 @@ class Config:
     #: The bot's API token from @BotFather. Used to log in to Telegram.
     #: Env var: ``TELEGRAM_BOT_TOKEN`` (required).
     telegram_bot_token: str
+    #: Human-readable identity used in prompts and operational UI.
+    #: Env var: ``AGENT_NAME`` (default ``"Assistant"``).
+    agent_name: str
     #: Telegram user ID of the bot's owner (you). Owner-only commands
     #: like ``/kill`` and ``/access`` check this. Direct-message-only
     #: mode also uses it to decide who can talk to the bot.
@@ -263,6 +294,7 @@ class Config:
             )
         cfg = cls(
             telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
+            agent_name=agent_name_from_env(),
             owner_id=int(_required("HAMROH_OWNER_ID")),
             model=model,
             effort=_env("HAMROH_EFFORT", "high") or "high",
@@ -331,6 +363,7 @@ class Config:
         """
         cfg = cls(
             telegram_bot_token="test-token",
+            agent_name=DEFAULT_AGENT_NAME,
             owner_id=0,
             model="claude-opus-4-7",
             effort="high",

@@ -15,6 +15,7 @@ import signal
 from typing import TYPE_CHECKING, Any
 
 from telegram import BotCommand, BotCommandScopeChat, Update
+from telegram.helpers import escape_markdown
 from telegram.ext import Application, ContextTypes
 
 from ..access import load_access, save_access
@@ -166,7 +167,8 @@ class OwnerCommandsMixin:
         """
         if not self._is_owner(update):
             return
-        lines: list[str] = ["*Shahnoza health*"]
+        name = escape_markdown(self.config.agent_name, version=1)
+        lines: list[str] = [f"*{name} health*"]
         status = "⏸ PAUSED (dropping messages)" if self._paused else "active"
         lines.append(f"- status: {status}")
         try:
@@ -208,7 +210,8 @@ class OwnerCommandsMixin:
         """
         if not self._is_owner(update):
             return
-        lines: list[str] = ["*Shahnoza audit*"]
+        name = escape_markdown(self.config.agent_name, version=1)
+        lines: list[str] = [f"*{name} audit*"]
         lines += await self._audit_tool_failures()
         lines += self._audit_prompt_backups()
         lines += self._audit_memory_footprint()

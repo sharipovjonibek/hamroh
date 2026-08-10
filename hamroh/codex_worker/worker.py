@@ -34,7 +34,7 @@ from codex_cli_bin import bundled_codex_path, bundled_path_dir  # type: ignore[i
 
 from ..cc_worker.events import CrashLoop, TurnResult
 from ..cc_worker.worker import WorkerHooks
-from ..config import Config
+from ..config import Config, agent_name_slug
 from ..helpers.transcript import (
     log_cc_result,
     log_cc_text,
@@ -194,6 +194,7 @@ class CodexWorker:
         self._session_id_path = config.session_id_path
         self._session_id = spec.session_id
         self._codex_home = spec.codex_home or getattr(config, "codex_home", None)
+        self._agent_name = spec.agent_name
 
         self._liveness_timeout = config.liveness_timeout_seconds
         self._liveness_poll = config.liveness_poll_seconds
@@ -258,8 +259,8 @@ class CodexWorker:
                 # runtime variables below survive the exec boundary.
                 launch_args_override=launch_args,
                 cwd=str(self.spec.cwd),
-                client_name="shahnoza",
-                client_title="Shahnoza Telegram Agent",
+                client_name=agent_name_slug(self._agent_name),
+                client_title=f"{self._agent_name} Telegram Agent",
             )
         )
         _patch_sdk_early_completion_race(runtime)

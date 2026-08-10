@@ -135,6 +135,7 @@ class CcSpawnSpec:
     mcp_config_path: Path
     json_schema_path: Path
     project_prompt_path: Path | None = None
+    agent_name: str = "Assistant"
     effort: str = "high"
     session_id: str | None = None
     #: If set, raw stdout/stderr from the CC subprocess is appended to
@@ -278,6 +279,13 @@ def _compose_system_prompt(spec: CcSpawnSpec) -> str:
     system_prompt = spec.system_prompt_path.read_text(encoding="utf-8")
     if spec.project_prompt_path and spec.project_prompt_path.exists():
         system_prompt += "\n\n" + spec.project_prompt_path.read_text(encoding="utf-8")
+    system_prompt += (
+        "\n\n# Configured identity\n\n"
+        f"Your name is {json.dumps(spec.agent_name, ensure_ascii=False)}. "
+        "This value comes from the AGENT_NAME deployment setting and is "
+        "authoritative. Use it whenever you identify yourself, even if a "
+        "project prompt or persisted instruction contains an older name."
+    )
     system_prompt += "\n\n" + runtime_block
     if spec.skills_index:
         system_prompt += "\n\n" + spec.skills_index

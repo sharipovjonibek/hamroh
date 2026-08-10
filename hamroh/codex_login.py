@@ -1,4 +1,4 @@
-"""One-time ChatGPT login helper for Shahnoza's isolated Codex identity.
+"""One-time ChatGPT login helper for an agent's isolated Codex identity.
 
 Run inside the dedicated Compose service::
 
@@ -17,6 +17,8 @@ import os
 from pathlib import Path
 
 from openai_codex import Codex, CodexConfig
+
+from .config import agent_name_from_env
 
 
 def _client() -> Codex:
@@ -54,7 +56,7 @@ def _account_label(codex: Codex, *, refresh_token: bool) -> str | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Authenticate Shahnoza's Codex runtime"
+        description=f"Authenticate {agent_name_from_env()}'s Codex runtime"
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(

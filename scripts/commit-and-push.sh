@@ -23,6 +23,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+source scripts/agent-name.sh
+load_agent_identity
+
 # Keep this checkout non-interactive. The server and the laptop both push, so
 # the branches diverge routinely; without pull.rebase git stops and asks how to
 # reconcile, which fails any unattended run (make update, cron).
@@ -40,7 +43,7 @@ if git diff --cached --quiet; then
     exit 0
 fi
 
-git -c user.name="Shahnoza Bot" -c user.email="shahnoza@localhost" \
+git -c user.name="$AGENT_NAME Bot" -c user.email="$AGENT_SLUG@localhost" \
     commit -m "sync server state [skip ci]"
 git pull --rebase
 git push

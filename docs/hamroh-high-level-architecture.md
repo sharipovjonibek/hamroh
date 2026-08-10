@@ -36,10 +36,11 @@ that path.
   used by `make auth`, with a localhost callback on port `1455`.
 
 In Docker, authentication belongs to a named volume mounted at
-`CODEX_HOME=/var/lib/codex`. The short-lived `codex-auth` service does not load
-the agent's `.env`; it only writes the ChatGPT OAuth cache. The running agent
-mounts the same volume. This is intentionally separate from the operator's
-general `~/.codex` directory and from Hamroh's Telegram/plugin secrets.
+`CODEX_HOME=/var/lib/codex`. The short-lived `codex-auth` service receives the
+non-secret `AGENT_NAME` setting through Compose interpolation, but does not
+load the agent's Telegram/plugin secrets; it only writes the ChatGPT OAuth
+cache. The running agent mounts the same volume. This is intentionally
+separate from the operator's general `~/.codex` directory.
 
 The Python dependency pins `openai-codex`, whose SDK starts its matching Codex
 app-server. `codex_worker` launches that process through `env -i` with only a

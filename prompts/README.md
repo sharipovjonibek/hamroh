@@ -6,7 +6,7 @@ and prepended to every turn.
 | File | Purpose | Tracked? |
 |---|---|---|
 | `system.md` | Generic hamroh behaviour — identity, tool discipline, formatting, security, memory rules. Ships with the repo. | yes |
-| `project.md` | Your overlay — bot name, persona, language, owner-specific rules. Loaded if present, appended after `system.md`. | gitignored |
+| `project.md` | Your overlay — persona, language, owner-specific rules. Loaded if present, appended after `system.md`. The bot name comes from `AGENT_NAME`. | gitignored |
 | `project.md.example` | Template you copy to `project.md` on first setup. | yes |
 | `subagents.md` | Docs for Codex collaboration tools. Appended only when `tool_groups.subagents` is `true` in `plugins.json`. | yes |
 

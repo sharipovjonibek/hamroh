@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import stat
 from pathlib import Path
@@ -26,7 +27,12 @@ from openai_codex.models import Notification
 
 from hamroh.cc_worker.cc_schema import schema_json
 from hamroh.cc_worker.events import TurnResult
-from hamroh.codex_worker import CodexSpawnSpec, CodexWorker, WorkerHooks
+from hamroh.codex_worker import (
+    CodexSpawnSpec,
+    CodexWorker,
+    WorkerHooks,
+    compose_developer_instructions,
+)
 from hamroh.codex_worker.worker import (
     _install_fail_closed_approval_handler,
     _patch_sdk_early_completion_race,
@@ -52,6 +58,16 @@ def _spec(tmp_path: Path, *, session_id: str | None = None) -> CodexSpawnSpec:
         },
         hamroh_tool_names=("telegram_send_message",),
     )
+
+
+def test_configured_agent_name_is_authoritative(tmp_path: Path) -> None:
+    spec = dataclasses.replace(_spec(tmp_path), agent_name="Dono Status")
+
+    prompt = compose_developer_instructions(spec)
+
+    assert "# Configured identity" in prompt
+    assert 'Your name is "Dono Status"' in prompt
+    assert "AGENT_NAME deployment setting" in prompt
 
 
 class _FakeHandle:
@@ -194,7 +210,9 @@ async def test_start_persists_thread_immediately_with_private_modes(
 ) -> None:
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "must-not-reach-codex")
     cfg = Config.for_test(tmp_path)
-    worker = CodexWorker(_spec(tmp_path), cfg)
+    object.__setattr__(cfg, "agent_name", "Dono Status")
+    spec = dataclasses.replace(_spec(tmp_path), agent_name=cfg.agent_name)
+    worker = CodexWorker(spec, cfg)
 
     await worker.start()
 
@@ -207,6 +225,8 @@ async def test_start_persists_thread_immediately_with_private_modes(
     assert call["sandbox"].value == "read-only"
     assert call["config"]["mcp_servers"]["hamroh"]["required"] is True
     launch_argv = _FakeCodex.instances[0].config.launch_args_override
+    assert _FakeCodex.instances[0].config.client_name == "dono-status"
+    assert _FakeCodex.instances[0].config.client_title == "Dono Status Telegram Agent"
     assert launch_argv[:2] == ("/usr/bin/env", "-i")
     assert not any("must-not-reach-codex" in part for part in launch_argv)
     await worker.stop()

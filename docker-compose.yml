@@ -83,6 +83,7 @@ services:
     network_mode: host
     environment:
       CODEX_HOME: /var/lib/codex
+      AGENT_NAME: ${AGENT_NAME:-Assistant}
     volumes:
       - codex-home:/var/lib/codex
     working_dir: /app

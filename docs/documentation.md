@@ -110,6 +110,7 @@ into a `Config` field.
 
 | Variable | Required | Default | Notes |
 |---|---|---|---|
+| `AGENT_NAME` | no | `Assistant` | Human-readable name used in model instructions, Telegram operational headings, and Codex client metadata. Change this one value to rename the runtime. |
 | `TELEGRAM_BOT_TOKEN` | yes | — | from @BotFather |
 | `HAMROH_OWNER_ID` | yes | — | your numeric Telegram user id |
 | `HAMROH_PROVIDER` | no | `codex` | `codex` uses the official SDK and ChatGPT login; `claude` selects the legacy worker. |
@@ -559,10 +560,10 @@ my-agent/                    # your private repo
 ├── framework/               # git submodule → github.com/sharipovjonibek/hamroh
 ├── Dockerfile         
 ├── docker-compose.yml       # runs framework/, mounts the files below
-├── .env                     # bot token, owner id, plugin secrets — gitignore this
+├── .env                     # agent name, bot token, owner id, plugin secrets
 ├── prompts/
 │   ├── system.md            # seeded from framework/ — required
-│   └── project.md           # bot name, language, personality
+│   └── project.md           # persona, language, project-specific rules
 ├── skills/                  # framework playbooks (seeded) + your own
 ├── memories/                # the bot's memory (git-tracked)
 ├── plugins.json             # tools + MCP capability surface
@@ -575,7 +576,7 @@ Set it up once:
 ```bash
 git init my-agent && cd my-agent
 git submodule add https://github.com/sharipovjonibek/hamroh framework
-cp framework/.env.example .env             # fill TELEGRAM_BOT_TOKEN + HAMROH_OWNER_ID
+cp framework/.env.example .env             # fill AGENT_NAME + Telegram settings
 chmod 600 .env
 cp framework/prompts/project.md.example prompts/project.md
 cp framework/prompts/system.md prompts/system.md         # required — re-copy after a framework bump
@@ -595,6 +596,7 @@ services:
     env_file: .env
     environment:
       CODEX_HOME: /var/lib/codex
+      AGENT_NAME: ${AGENT_NAME:-Assistant}
     volumes:
       - ./data:/app/data
       - codex-home:/var/lib/codex
@@ -612,6 +614,7 @@ services:
     network_mode: host       # expose the OAuth localhost callback on port 1455
     environment:
       CODEX_HOME: /var/lib/codex
+      AGENT_NAME: ${AGENT_NAME:-Assistant}
     volumes:
       - codex-home:/var/lib/codex
     working_dir: /app
@@ -641,8 +644,9 @@ Notes:
 - **Update the framework:** `cd framework && git pull origin main && cd .. &&
   git add framework && git commit -m "bump framework"`.
 - **Keep Codex private.** Mount the named `codex-home` volume, not the host's
-  general `~/.codex`. The auth service does not need `env_file: .env`, and
-  therefore cannot see Telegram or plugin secrets.
+  general `~/.codex`. The auth service receives `AGENT_NAME` through Compose
+  interpolation but does not need `env_file: .env`, so it cannot see Telegram
+  or plugin secrets.
 - **Browser OAuth is the default.** Open the printed authorization URL in a
   browser on this host. For a remote host, forward port `1455` over SSH first.
   If that callback cannot be forwarded, explicitly append
@@ -690,14 +694,15 @@ The Codex developer instructions are assembled from two files:
 1. **`prompts/system.md`** — generic hamroh template covering tool
    discipline, message format, memory, reminders, and prompt-injection
    resistance. Ships with the repo.
-2. **`prompts/project.md`** — project-specific overlay (identity,
+2. **`prompts/project.md`** — project-specific overlay (persona,
    integrations, custom instructions). Gitignored. Copy
    `prompts/project.md.example` to get started. Path is hardcoded —
    always at `prompts/project.md`.
 
 If `project.md` doesn't exist, only the base prompt is used. The worker then
-appends public runtime settings, skills and memory indexes, the exact Hamroh
-MCP tool list, and (when enabled) subagent instructions.
+appends an authoritative identity block from `AGENT_NAME`, public runtime
+settings, skills and memory indexes, the exact Hamroh MCP tool list, and (when
+enabled) subagent instructions.
 
 ## External MCP integrations
 
@@ -858,7 +863,8 @@ is enforced by code, not by hope, and tested in
   unexpected approval request. See [tools.md](tools.md).
 - **Private Codex identity and clean runtime environment.** Compose mounts a
   named volume at `CODEX_HOME=/var/lib/codex`; it never mounts the operator's
-  general `~/.codex`. The auth helper does not load `.env`, and the worker
+  general `~/.codex`. The auth helper receives only the non-secret agent name,
+  not the rest of `.env`, and the worker
   launches the app-server through `env -i`, so Telegram and plugin secrets do
   not enter the model runtime's ambient environment. Explicit external-MCP
   credentials still travel in that server's scoped Codex configuration.

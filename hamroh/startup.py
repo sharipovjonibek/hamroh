@@ -402,6 +402,7 @@ def _build_cc_spec(
     return CcSpawnSpec(
         binary=config.claude_code_bin,
         model=config.model,
+        agent_name=config.agent_name,
         system_prompt_path=Path("prompts/system.md").resolve(),
         project_prompt_path=Path("prompts/project.md").resolve(),
         mcp_config_path=mcp_config_path,
@@ -527,6 +528,7 @@ def _build_codex_spec(
     return CodexSpawnSpec(
         model=config.model or None,
         effort=config.effort,
+        agent_name=config.agent_name,
         system_prompt_path=Path("prompts/system.md").resolve(),
         project_prompt_path=Path("prompts/project.md").resolve(),
         json_schema_path=schema_path,

@@ -40,6 +40,7 @@ class CodexSpawnSpec:
     codex_bin: str | None = None
     codex_home: Path | None = None
     project_prompt_path: Path | None = None
+    agent_name: str = "Assistant"
     sandbox: SandboxName = "read-only"
     codex_config: Mapping[str, Any] = field(default_factory=dict)
     skills_index: str = ""
@@ -86,6 +87,14 @@ def compose_developer_instructions(spec: CodexSpawnSpec) -> str:
     prompt = spec.system_prompt_path.read_text(encoding="utf-8")
     if spec.project_prompt_path is not None and spec.project_prompt_path.exists():
         prompt += "\n\n" + spec.project_prompt_path.read_text(encoding="utf-8")
+
+    prompt += (
+        "\n\n# Configured identity\n\n"
+        f"Your name is {json.dumps(spec.agent_name, ensure_ascii=False)}. "
+        "This value comes from the AGENT_NAME deployment setting and is "
+        "authoritative. Use it whenever you identify yourself, even if a "
+        "project prompt or persisted instruction contains an older name."
+    )
 
     model_name = spec.model or "Codex recommended subscription default"
     prompt += (

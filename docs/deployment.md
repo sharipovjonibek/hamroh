@@ -31,9 +31,9 @@ cd ~/hamroh
 # Configure
 cp .env.example .env
 chmod 600 .env
-vim .env   # set TELEGRAM_BOT_TOKEN and HAMROH_OWNER_ID; no OpenAI key is needed
+vim .env   # set AGENT_NAME, TELEGRAM_BOT_TOKEN, and HAMROH_OWNER_ID
 cp prompts/project.md.example prompts/project.md
-vim prompts/project.md   # customize identity, integrations, team info
+vim prompts/project.md   # customize persona, integrations, and team info
 
 # Build, then authenticate this bot's private Codex home once.
 # The command prints an authorization URL; open it on your computer.
@@ -55,8 +55,9 @@ SSH port forwarding above routes that callback from your computer to the
 server. For a local desktop deployment, no SSH tunnel is needed: open the URL
 in a browser on the same computer.
 
-The auth container deliberately does not load `.env`, so the login helper
-cannot see the Telegram token or external MCP credentials. The resulting
+The auth container deliberately receives only `AGENT_NAME` and `CODEX_HOME`,
+so the login helper cannot see the Telegram token or external MCP credentials.
+The resulting
 ChatGPT OAuth cache is stored in the named `codex-home` Docker volume and
 mounted at `/var/lib/codex` as `CODEX_HOME` in the agent. Do not mount a
 developer's general `~/.codex` directory: it mixes the bot's identity and

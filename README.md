@@ -33,6 +33,7 @@ Pre-requisite:
 git clone https://github.com/sharipovjonibek/hamroh && cd hamroh
 
 cp .env.example .env && nano .env
+#   set AGENT_NAME  (the display name used in prompts and operational UI)
 #   set TELEGRAM_BOT_TOKEN  (create a bot in @BotFather and copy its token here)
 #   set HAMROH_OWNER_ID  (your numeric Telegram user id, from @userinfobot)
 #   HAMROH_PROVIDER=codex is the default; model is optional
@@ -44,7 +45,7 @@ cp plugins.json.example plugins.json && nano plugins.json
 #   single source of truth for the bot's capability surface — see below
 
 cp prompts/project.md.example prompts/project.md && nano prompts/project.md
-#   set bot name, language, personality
+#   set language, personality, and project-specific rules
 
 make auth                                                                  # build + one-time ChatGPT browser login
 make up                                                                    # run, wait for "hamroh is live"
@@ -104,9 +105,10 @@ Beyond the config files, you extend the bot by dropping in files — no Python n
 - **MCPs & tools** — capability surface, what tools, skills, and MCPs are on `plugins.json` (`stdio` or remote HTTP/SSE), with credentials pulled from `.env` via `${VAR}`. Read [docs/tools.md](docs/tools.md). [docs/documentation.md](docs/documentation.md#what-pluginsjson-controls).
 - **Reminders** — custom recurring reminders shipped with the bot are at `default-reminders.json`. [docs](docs/documentation.md#custom-reminders-default-remindersjson).
 - **Memory notes** — the bot's notes live under `memories/` (e.g. `memories/notes/preferences.md`); the bot reads, searches, and writes them, and you can curate them too. Addressed by full path (`memories/...`) and git-tracked, so memories survive restarts and you can commit them. [memories/README.md](memories/README.md)
-- **Persona & rules** — extend the system prompt by editing `prompts/project.md`; it's appended to the shipped `prompts/system.md`. [docs](docs/documentation.md#system-prompt). Bot name, language, house rules, owner-specific instructions; appended to the shipped `prompts/system.md`.
+- **Name** — set `AGENT_NAME` in `.env`; it is the single source of truth for the runtime identity.
+- **Persona & rules** — extend the system prompt by editing `prompts/project.md`; it's appended to the shipped `prompts/system.md`. [docs](docs/documentation.md#system-prompt). Language, house rules, and owner-specific instructions belong here.
 - **Access** — who can DM the bot or use it in groups (hot-reloaded, no restart). [docs/documentation.md](docs/documentation.md#access-control).
-- `.env` secrets — Telegram bot token, owner id, plus any credentials your `plugins.json` entries reference via `${VAR}` (the example file's GitLab / GitHub entries demonstrate the pattern).
+- **`.env` settings and secrets** — agent name, Telegram bot token, owner id, plus any credentials your `plugins.json` entries reference via `${VAR}` (the example file's GitLab / GitHub entries demonstrate the pattern).
 
 Read more in [docs/documentation.md](docs/documentation.md#run-your-own-agent).
 

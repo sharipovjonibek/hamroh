@@ -106,3 +106,18 @@ async def test_logs_reports_when_no_file_yet(tmp_path: Path) -> None:
 
     # Then the owner is told there are no logs
     update.effective_message.reply_text.assert_awaited_once_with("no logs yet")
+
+
+@pytest.mark.asyncio
+async def test_health_heading_uses_configured_agent_name(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    object.__setattr__(cfg, "agent_name", "Dono_Status")
+    dispatcher = _dispatcher(cfg)
+    dispatcher.engine = None
+    dispatcher.db.fetch_one = AsyncMock(side_effect=[None, {"c": 0}])
+    update = _update(OWNER)
+
+    await dispatcher._cmd_health(update, _ctx())
+
+    heading = update.effective_message.reply_text.await_args.args[0].splitlines()[0]
+    assert heading == "*Dono\\_Status health*"

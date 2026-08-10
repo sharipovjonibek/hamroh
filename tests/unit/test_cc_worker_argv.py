@@ -70,6 +70,18 @@ def test_skills_index_absent_when_empty(spec: CcSpawnSpec) -> None:
     assert "# Available skills" not in composed
 
 
+def test_configured_agent_name_is_authoritative(spec: CcSpawnSpec) -> None:
+    from hamroh.cc_worker.spec import _compose_system_prompt
+
+    composed = _compose_system_prompt(
+        dataclasses.replace(spec, agent_name="Dono Status")
+    )
+
+    assert "# Configured identity" in composed
+    assert 'Your name is "Dono Status"' in composed
+    assert "AGENT_NAME deployment setting" in composed
+
+
 def _tools_value(argv: list[str]) -> str:
     """The comma-joined value passed to the exclusive ``--tools`` flag."""
     return argv[argv.index("--tools") + 1]

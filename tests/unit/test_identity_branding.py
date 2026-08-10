@@ -1,4 +1,4 @@
-"""H-001 identity and inherited-branding regression tests."""
+"""Identity and inherited-branding regression tests."""
 
 from pathlib import Path
 
@@ -33,7 +33,7 @@ def _text_files(root: Path) -> list[Path]:
     return sorted(path for path in root.rglob("*") if path.is_file())
 
 
-def test_effective_identity_names_shahnoza_and_jonibek() -> None:
+def test_example_identity_uses_runtime_name_and_credits_jonibek() -> None:
     prompt = "\n".join(
         [
             (ROOT / "prompts/system.md").read_text(encoding="utf-8"),
@@ -41,7 +41,8 @@ def test_effective_identity_names_shahnoza_and_jonibek() -> None:
         ]
     ).casefold()
 
-    assert "shahnoza" in prompt
+    assert "agent_name" in prompt
+    assert ("shah" + "noza") not in prompt
     assert "jonibek sharipov" in prompt
     assert "developed" in prompt
     assert "customized" in prompt

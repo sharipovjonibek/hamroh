@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 import hamroh.startup as startup
-from hamroh.config import Config
+from hamroh.config import Config, agent_name_slug
 from hamroh.plugins import McpPluginSpec, Plugins
 
 
@@ -27,6 +27,7 @@ def test_from_env_defaults_to_codex_without_model(
     monkeypatch.delenv("HAMROH_MODEL", raising=False)
     monkeypatch.delenv("CODEX_BIN", raising=False)
     monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.delenv("AGENT_NAME", raising=False)
 
     config = Config.from_env()
 
@@ -35,6 +36,7 @@ def test_from_env_defaults_to_codex_without_model(
     assert config.effort == "high"
     assert config.codex_bin is None
     assert config.codex_home == (tmp_path / "data" / "codex").resolve()
+    assert config.agent_name == "Assistant"
 
 
 def test_from_env_applies_explicit_codex_runtime_settings(
@@ -46,6 +48,7 @@ def test_from_env_applies_explicit_codex_runtime_settings(
     monkeypatch.setenv("HAMROH_EFFORT", "medium")
     monkeypatch.setenv("CODEX_BIN", "/opt/codex/bin/codex")
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "private-codex-home"))
+    monkeypatch.setenv("AGENT_NAME", "Dono Status")
 
     config = Config.from_env()
 
@@ -54,6 +57,19 @@ def test_from_env_applies_explicit_codex_runtime_settings(
     assert config.effort == "medium"
     assert config.codex_bin == "/opt/codex/bin/codex"
     assert config.codex_home == (tmp_path / "private-codex-home").resolve()
+    assert config.agent_name == "Dono Status"
+    assert agent_name_slug(config.agent_name) == "dono-status"
+
+
+@pytest.mark.parametrize("value", ["   ", "line one\nline two", "x" * 81])
+def test_from_env_rejects_unsafe_agent_names(
+    value: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _required_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("AGENT_NAME", value)
+
+    with pytest.raises(RuntimeError, match="AGENT_NAME"):
+        Config.from_env()
 
 
 def test_from_env_requires_model_only_for_legacy_claude(
