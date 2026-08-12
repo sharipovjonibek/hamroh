@@ -117,7 +117,7 @@ into a `Config` field.
 | `HAMROH_MODEL` | no for Codex | — | Empty uses Codex's recommended subscription default. Required for the legacy Claude provider. |
 | `HAMROH_EFFORT` | no | `high` | Codex reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, or `xhigh` (model support varies). |
 | `CODEX_BIN` | no | SDK-bundled | Optional full path to a compatible Codex binary; normally leave unset so the pinned SDK supplies its runtime. |
-| `CODEX_HOME` | no | `<data>/codex` | Private Codex auth/session home. Compose sets `/var/lib/codex` on a named volume. Never point it at a shared operator `~/.codex`. |
+| `CODEX_HOME` | no | `<data>/codex` | Private Codex auth/session home and generated-image store. Compose sets `/var/lib/codex` on a named volume. Never point it at a shared operator `~/.codex`. |
 | `CLAUDE_CODE_BIN` | legacy only | `claude` | CLI used only with `HAMROH_PROVIDER=claude`; not installed by the default image. |
 | `HAMROH_DATA_DIR` | no | `./data` | SQLite, attachments, renders, logs, and persistent thread id. |
 | `HAMROH_ACCESS_PATH` | no | repo-root `access.json` | override where `access.json` lives (mainly so the e2e harness can point at a temp file). |
@@ -335,9 +335,14 @@ Every memory is named by its **full path** starting with `memories/` — a bare
 `memory_search`. See [`memories/README.md`](../memories/README.md) for the
 full how-to.
 
-## Rendered visuals
+## Generated and rendered visuals
 
-Two tools turn structured data into a Telegram photo:
+With the Codex provider, `image_gen` produces raster images somewhere below
+`$CODEX_HOME/generated_images/` and returns an absolute path. Pass that path
+directly to `telegram_send_photo`; no copy or writable Codex sandbox is
+required.
+
+Hamroh's render tools turn structured data into a Telegram photo:
 
 - `render_html(html, width?=800, height?=600, title?)` — runs the HTML
   through headless Chromium (Playwright) with **all outbound network
@@ -346,8 +351,12 @@ Two tools turn structured data into a Telegram photo:
   path. Inline any CSS/JS the page needs (Chart.js, D3, fonts) — the
   browser can't fetch.
 - `telegram_send_photo(chat_id, path, caption?, reply_to_message_id?)` — sends
-  a file from `data/renders/` as an inline Telegram photo. Path-locked
-  to the renders root with the same hardening as `memory_read`.
+  a relative file from `data/renders/` or an absolute `image_gen` output from
+  `$CODEX_HOME/generated_images/` as an inline Telegram photo. The roots are
+  independently path-restricted; generated images are snapshotted through
+  no-follow file descriptors before upload. Generated outputs must be PNG or
+  JPEG and no larger than 10 MiB. Other absolute paths, including Codex
+  authentication files, are rejected.
 
 When composing HTML, keep all CSS and JavaScript inline, choose a layout
 that matches the data, and make labels readable at the requested image
@@ -1130,6 +1139,7 @@ hamroh/
 │   ├── prompt_backups/         # auto-backups before instruction_append writes
 │   ├── logs/                   # rotating structured application log
 │   └── codex/                  # local CODEX_HOME (Compose uses a volume)
+│       └── generated_images/   # raster outputs produced by Codex image_gen
 ├── scripts/
 │   ├── sync-memories.sh        # rsync helper for server ↔ local sync
 │   └── prune-backups.sh        # archive stale prompt backups (keep newest 50)
@@ -1190,7 +1200,7 @@ hamroh/
 │       ├── telegram_read_attachment.py  # read a Telegram photo/doc by path under data/attachments/
 │       ├── telegram_send_memory_document.py # send a memory file as a Telegram document
 │       ├── render_html.py      # HTML → PNG via headless Chromium (network blocked)
-│       ├── telegram_send_photo.py       # send a render as an inline Telegram photo
+│       ├── telegram_send_photo.py       # send a render/image_gen output as a Telegram photo
 │       ├── memory.py           # list/read/write/append memory (read-before-write)
 │       ├── instructions.py     # read/append project.md (owner-only by prompt policy)
 │       ├── skills.py           # list/read agent skill playbooks under skills/

@@ -9,7 +9,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from telegram import InputFile
 
+from hamroh.storage.generated_image_store import GeneratedImageStore
 from hamroh.storage.render_store import RenderPathError, RenderStore
 from hamroh.tools import render_html as render_html_mod
 from hamroh.tools.base import ToolContext
@@ -199,6 +201,100 @@ async def test_send_photo_happy_path(store: RenderStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_photo_accepts_image_gen_absolute_path(
+    store: RenderStore, tmp_path: Path
+) -> None:
+    generated_root = tmp_path / "codex" / "generated_images"
+    generated = GeneratedImageStore(generated_root)
+    image = generated.root / "thread-id" / "portrait.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"\x89PNG\r\n\x1a\nreal-generated-image")
+    bot = _mock_bot(message_id=456)
+    tool = TelegramSendPhotoTool(
+        ToolContext(
+            bot=bot,
+            render_store=store,
+            generated_image_store=generated,
+        )
+    )
+
+    result = await tool.run(
+        SendPhotoArgs(chat_id=42, path=str(image), caption="generated")
+    )
+
+    assert result.is_error is False
+    assert result.data is not None
+    assert result.data["path"] == str(image)
+    kwargs = bot.send_photo.await_args.kwargs
+    upload = kwargs["photo"]
+    assert isinstance(upload, InputFile)
+    assert upload.filename == "portrait.png"
+    assert upload.input_file_content == b"\x89PNG\r\n\x1a\nreal-generated-image"
+    assert kwargs["caption"] == "generated"
+
+
+@pytest.mark.asyncio
+async def test_send_photo_does_not_reopen_generated_path_after_validation(
+    store: RenderStore, tmp_path: Path
+) -> None:
+    generated = GeneratedImageStore(tmp_path / "codex" / "generated_images")
+    image = generated.root / "thread-id" / "portrait.png"
+    image.parent.mkdir(parents=True)
+    safe_content = b"\x89PNG\r\n\x1a\nsafe-generated-image"
+    image.write_bytes(safe_content)
+    secret = generated.root.parent / "auth.json"
+    secret.write_bytes(b"password-equivalent-secret")
+    bot = _mock_bot(message_id=457)
+
+    async def swap_before_consuming(**kwargs):
+        image.unlink()
+        image.symlink_to(secret)
+        upload = kwargs["photo"]
+        assert isinstance(upload, InputFile)
+        assert upload.input_file_content == safe_content
+        return MagicMock(message_id=457)
+
+    bot.send_photo.side_effect = swap_before_consuming
+    tool = TelegramSendPhotoTool(
+        ToolContext(
+            bot=bot,
+            render_store=store,
+            generated_image_store=generated,
+        )
+    )
+
+    result = await tool.run(SendPhotoArgs(chat_id=42, path=str(image)))
+
+    assert result.is_error is False
+    assert image.is_symlink()
+    bot.send_photo.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_send_photo_rejects_absolute_path_outside_generated_images(
+    store: RenderStore, tmp_path: Path
+) -> None:
+    generated = GeneratedImageStore(tmp_path / "codex" / "generated_images")
+    auth = tmp_path / "codex" / "auth.json"
+    auth.parent.mkdir(parents=True)
+    auth.write_text("secret", encoding="utf-8")
+    bot = _mock_bot()
+    tool = TelegramSendPhotoTool(
+        ToolContext(
+            bot=bot,
+            render_store=store,
+            generated_image_store=generated,
+        )
+    )
+
+    result = await tool.run(SendPhotoArgs(chat_id=1, path=str(auth)))
+
+    assert result.is_error is True
+    assert "must be under" in result.content
+    bot.send_photo.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_send_photo_path_traversal_rejected(store: RenderStore) -> None:
     bot = _mock_bot()
     tool = TelegramSendPhotoTool(ToolContext(bot=bot, render_store=store))
@@ -232,6 +328,18 @@ async def test_send_photo_no_render_store() -> None:
     result = await tool.run(SendPhotoArgs(chat_id=1, path="x.png"))
     assert result.is_error is True
     assert "render store" in result.content
+
+
+@pytest.mark.asyncio
+async def test_send_photo_no_generated_image_store(tmp_path: Path) -> None:
+    bot = _mock_bot()
+    tool = TelegramSendPhotoTool(ToolContext(bot=bot, render_store=None))
+    result = await tool.run(
+        SendPhotoArgs(chat_id=1, path=str(tmp_path / "generated.png"))
+    )
+    assert result.is_error is True
+    assert "generated image store" in result.content
+    bot.send_photo.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

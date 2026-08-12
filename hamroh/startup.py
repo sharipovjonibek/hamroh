@@ -49,6 +49,7 @@ from .scheduler.reminders_config import (
 )
 from .storage.skills_store import SkillsStore, render_skills_index
 from .storage.attachments_store import AttachmentStore
+from .storage.generated_image_store import GeneratedImageStore
 from .storage.memory_store import MemoryStore, render_memory_index
 from .storage.render_store import RenderStore
 from .telegram_io import DispatcherDeps, TelegramDispatcher
@@ -144,6 +145,7 @@ class _Stores:
     skills: SkillsStore
     attachments: AttachmentStore
     renders: RenderStore
+    generated_images: GeneratedImageStore
     rate_limiter: RateLimiter
 
 
@@ -165,6 +167,7 @@ def _build_stores(config: Config, db: Database, plugins: Plugins) -> _Stores:
     attachments = AttachmentStore(config.attachments_dir)
     renders = RenderStore(config.renders_dir)
     renders.ensure_root()
+    generated_images = GeneratedImageStore(config.generated_images_dir)
     rate_limiter = RateLimiter(
         db,
         RateLimitConfig(limit=config.rate_limit_per_min, owner_id=config.owner_id),
@@ -175,6 +178,7 @@ def _build_stores(config: Config, db: Database, plugins: Plugins) -> _Stores:
         skills=skills,
         attachments=attachments,
         renders=renders,
+        generated_images=generated_images,
         rate_limiter=rate_limiter,
     )
 
@@ -365,6 +369,7 @@ async def _start_mcp_server(
         skills_store=stores.skills,
         attachment_store=stores.attachments,
         render_store=stores.renders,
+        generated_image_store=stores.generated_images,
         browser_manager=browser_manager,
         browser_session=BrowserSession(browser_manager),
         chat_titles=chat_titles,

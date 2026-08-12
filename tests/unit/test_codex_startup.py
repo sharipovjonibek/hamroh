@@ -11,6 +11,7 @@ import pytest
 import hamroh.startup as startup
 from hamroh.config import Config, agent_name_slug
 from hamroh.plugins import McpPluginSpec, Plugins
+from hamroh.storage.generated_image_store import GeneratedImageStore
 
 
 def _required_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -36,6 +37,10 @@ def test_from_env_defaults_to_codex_without_model(
     assert config.effort == "high"
     assert config.codex_bin is None
     assert config.codex_home == (tmp_path / "data" / "codex").resolve()
+    assert (
+        config.generated_images_dir
+        == (tmp_path / "data" / "codex" / "generated_images").resolve()
+    )
     assert config.agent_name == "Assistant"
 
 
@@ -57,8 +62,41 @@ def test_from_env_applies_explicit_codex_runtime_settings(
     assert config.effort == "medium"
     assert config.codex_bin == "/opt/codex/bin/codex"
     assert config.codex_home == (tmp_path / "private-codex-home").resolve()
+    assert (
+        config.generated_images_dir
+        == (tmp_path / "private-codex-home" / "generated_images").resolve()
+    )
     assert config.agent_name == "Dono Status"
     assert agent_name_slug(config.agent_name) == "dono-status"
+
+
+@pytest.mark.asyncio
+async def test_startup_wires_generated_image_store_into_tool_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = Config.for_test(tmp_path)
+    plugins = Plugins()
+    stores = startup._build_stores(config, SimpleNamespace(), plugins)
+    captured: dict[str, object] = {}
+
+    class FakeMcpServer:
+        def __init__(self, ctx, **_kwargs) -> None:
+            captured["ctx"] = ctx
+            self.url = "http://127.0.0.1:8765/mcp"
+
+        async def start(self) -> None:
+            return None
+
+    monkeypatch.setattr(startup, "McpServer", FakeMcpServer)
+    app = SimpleNamespace(db=SimpleNamespace(), config=config)
+
+    ctx, _mcp = await startup._start_mcp_server(app, stores, plugins, {})
+
+    assert isinstance(stores.generated_images, GeneratedImageStore)
+    assert stores.generated_images.root == config.generated_images_dir
+    assert ctx.generated_image_store is stores.generated_images
+    assert captured["ctx"] is ctx
 
 
 @pytest.mark.parametrize("value", ["   ", "line one\nline two", "x" * 81])
@@ -156,16 +194,12 @@ def test_build_codex_config_locks_down_features_and_maps_mcp_allowlists() -> Non
 
     knowledge = config["mcp_servers"]["knowledge"]
     assert knowledge["url"] == "https://mcp.example.test/api"
-    assert knowledge["http_headers"] == {
-        "Authorization": "Bearer test-token"
-    }
+    assert knowledge["http_headers"] == {"Authorization": "Bearer test-token"}
     assert "enabled_tools" not in knowledge
 
 
 def test_build_codex_config_enables_only_requested_native_capabilities() -> None:
-    plugins = Plugins(
-        tool_groups={"bash": False, "code": True, "subagents": True}
-    )
+    plugins = Plugins(tool_groups={"bash": False, "code": True, "subagents": True})
 
     features = startup._build_codex_config(plugins, _fake_mcp())["features"]
 

@@ -1,6 +1,6 @@
 [project]
 name = "hamroh"
-version = "0.3.0"
+version = "0.4.0"
 description = "Python harness for running a Telegram agent through the OpenAI Codex SDK and a local MCP server."
 readme = "README.md"
 requires-python = ">=3.11"

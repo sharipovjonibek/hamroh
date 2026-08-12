@@ -2,11 +2,9 @@
 
 Each module is a thin wrapper around one storage folder — the git-tracked
 ``memories/`` at the repo root, plus ``data/attachments/``,
-``data/renders/``, the operator-curated ``skills/`` (``skills_store``) and
-``prompts/`` (``instructions_store``) — that does path-safety hardening,
-size capping, and read/write helpers. The shape is the same everywhere: a
-``Store`` class with ``ensure_root``, ``resolve_path``, plus per-kind
-read/write methods.
+``data/renders/``, Codex-generated images, the operator-curated ``skills/``
+(``skills_store``) and ``prompts/`` (``instructions_store``) — that does
+path-safety hardening, size capping, and read/write helpers.
 
 The core stores re-export their public API here so callers can write
 ``from hamroh.storage import MemoryStore`` etc. without caring which
@@ -24,6 +22,12 @@ from .attachments_store import (
     ImageAttachment,
     TextAttachment,
 )
+from .generated_image_store import (
+    MAX_GENERATED_IMAGE_BYTES,
+    GeneratedImage,
+    GeneratedImagePathError,
+    GeneratedImageStore,
+)
 from .memory_store import (
     MAX_MEMORY_BYTES,
     MemoryFile,
@@ -33,10 +37,14 @@ from .memory_store import (
 from .render_store import Render, RenderPathError, RenderStore
 
 __all__ = [
+    "MAX_GENERATED_IMAGE_BYTES",
     "MAX_MEMORY_BYTES",
     "MAX_TEXT_BYTES",
     "AttachmentPathError",
     "AttachmentStore",
+    "GeneratedImage",
+    "GeneratedImagePathError",
+    "GeneratedImageStore",
     "ImageAttachment",
     "MemoryFile",
     "MemoryPathError",

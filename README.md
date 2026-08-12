@@ -121,14 +121,14 @@ Read more in [docs/documentation.md](docs/documentation.md#run-your-own-agent).
 
 A quick tour — the full per-tool surface (args, limits, rails) is in [docs/tools.md](docs/tools.md).
 
-- **Communication & media:** send / reply / edit / delete, reactions, polls; render HTML and LaTeX to PNG; read inbound photos (vision), text-like docs, and PDFs.
+- **Communication & media:** send / reply / edit / delete, reactions, polls; with the Codex provider, generate raster images via `image_gen`; render HTML and LaTeX to PNG; deliver those images directly; read inbound photos (vision), text-like docs, and PDFs.
 - **Memory:** persistent markdown addressed by full path (list / search / read / write / append), 64 KiB/file, read-before-write, survives restarts. One store: a **git-tracked** `memories/...` folder the bot reads, searches, writes, and appends to — and that you can commit and curate. See [`memories/README.md`](memories/README.md).
 - **Search & history:** web search / fetch (no internal URLs) and read-only SQL SELECTs on the chat database.
 - **Browser:** drives a real headless Chromium for pages `WebFetch` can't reach — navigate, click, fill, read, screenshot, download. On by default.
 - **Scheduling:** one-shot + cron reminders, plus git-tracked custom reminders in `default-reminders.json`.
 - **Skills & project rules:** operator-curated playbooks under `skills/`; the bot can append rules to `prompts/project.md` (owner-only).
 - **Opt-in:** shell, code editing, and subagents — all off by default, toggled in `plugins.json`. Plug in any external MCP server the same way.
-- **Can't:** generate images; send/read voice, video, stickers, GIFs; moderate groups; make calls.
+- **Can't:** send/read voice, video, stickers, GIFs; moderate groups; make calls.
 
 ## Architecture
 

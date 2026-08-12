@@ -28,6 +28,7 @@ from ..helpers.transcript import ChatRef, MsgRef, log_outbound
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..storage.attachments_store import AttachmentStore
     from ..db.database import Database
+    from ..storage.generated_image_store import GeneratedImageStore
     from ..storage.instructions_store import InstructionsStore
     from ..storage.memory_store import MemoryStore
     from ..storage.render_store import RenderStore
@@ -66,6 +67,7 @@ class ToolContext:
     skills_store: "SkillsStore | None" = None
     attachment_store: "AttachmentStore | None" = None
     render_store: "RenderStore | None" = None
+    generated_image_store: "GeneratedImageStore | None" = None
     #: Process-wide warm Chromium shared by render_html/render_latex so the
     #: browser isn't relaunched per call. None in tests (falls back to a
     #: throwaway browser inside the renderer).

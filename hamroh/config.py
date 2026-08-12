@@ -284,6 +284,12 @@ class Config:
         object.__setattr__(self, "log_dir", self.data_dir / "logs")
         object.__setattr__(self, "codex_home", self.data_dir / "codex")
 
+    @property
+    def generated_images_dir(self) -> Path:
+        """Read-only delivery root for raster files produced by ``image_gen``."""
+
+        return self.codex_home / "generated_images"
+
     @classmethod
     def from_env(cls) -> "Config":
         provider = _choice("HAMROH_PROVIDER", "codex", ("codex", "claude"))

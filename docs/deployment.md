@@ -57,9 +57,9 @@ in a browser on the same computer.
 
 The auth container deliberately receives only `AGENT_NAME` and `CODEX_HOME`,
 so the login helper cannot see the Telegram token or external MCP credentials.
-The resulting
-ChatGPT OAuth cache is stored in the named `codex-home` Docker volume and
-mounted at `/var/lib/codex` as `CODEX_HOME` in the agent. Do not mount a
+The resulting ChatGPT OAuth cache and Codex-generated images are stored in the
+named `codex-home` Docker volume and mounted at `/var/lib/codex` as
+`CODEX_HOME` in the agent. Do not mount a
 developer's general `~/.codex` directory: it mixes the bot's identity and
 conversation state with an interactive Codex setup. Check the isolated login
 at any time with `make auth-status`.
@@ -201,8 +201,10 @@ repo and needs no migration. `data/` contains:
 - `data/renders/` — outbound PNGs from `render_html`
 - `data/logs/` — rotating application logs
 
-Codex authentication is not under `data/`: it lives in the private
-`codex-home` Docker volume mounted at `CODEX_HOME=/var/lib/codex`.
+Codex authentication and `image_gen` outputs are not under `data/`: they live
+in the private `codex-home` Docker volume mounted at
+`CODEX_HOME=/var/lib/codex`. `telegram_send_photo` may read only the
+`generated_images/` subtree; it cannot read the adjacent authentication files.
 
 Headless Chromium for `render_html` is pre-installed in the Docker
 image (`playwright install --with-deps chromium`) — no per-host

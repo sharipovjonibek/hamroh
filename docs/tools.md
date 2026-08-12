@@ -33,7 +33,7 @@ server. Auto-discovered from `hamroh/tools/*.py` (each tool is a
 | `telegram_send_memory_document` | Send a memory file (under `memories/`) to a chat as a downloadable document. Path-locked to the memory root. Optional caption + reply-to. |
 | `render_html` | Render an HTML snippet to PNG via headless Chromium → `data/renders/`. Use for tables/charts/diffs that markdown can't fit. Network blocked — inline any CSS/JS. Returns the relative path. |
 | `render_latex` | Render a LaTeX expression to PNG via KaTeX (loaded from `cdn.jsdelivr.net` only — narrow allow-list). Pass the LaTeX without surrounding `$$`. Optional `title`. Returns the relative path; pair with `telegram_send_photo`. |
-| `telegram_send_photo` | Send a rendered photo (from `data/renders/`) as an inline Telegram photo with preview. Pair with `render_html` or `render_latex`. |
+| `telegram_send_photo` | Send an allowlisted image as an inline Telegram photo with preview. Accepts relative paths from `render_html`/`render_latex` and absolute PNG/JPEG paths returned by Codex `image_gen` under `$CODEX_HOME/generated_images` (10 MiB maximum). |
 
 ### Browser
 
