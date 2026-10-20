@@ -8,10 +8,10 @@ license = { text = "MIT" }
 authors = [{ name = "Jonibek Sharipov" }]
 
 dependencies = [
-    "openai-codex==0.1.0b3",
+    "openai-codex==0.163.0",
     # The SDK pins this matching alpha CLI transitively. Declaring the same
     # exact requirement here opts only this package into uv prereleases.
-    "openai-codex-cli-bin==0.137.0a4",
+    "openai-codex-cli-bin==0.163.0",
     "mcp>=1.2.0",
     "uvicorn>=0.30",
     "starlette>=0.37",
