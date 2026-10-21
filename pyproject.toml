@@ -9,8 +9,7 @@ authors = [{ name = "Jonibek Sharipov" }]
 
 dependencies = [
     "openai-codex==0.163.0",
-    # The SDK pins this matching alpha CLI transitively. Declaring the same
-    # exact requirement here opts only this package into uv prereleases.
+    # Keep the SDK and its bundled CLI on the same tested release.
     "openai-codex-cli-bin==0.163.0",
     "mcp>=1.2.0",
     "uvicorn>=0.30",

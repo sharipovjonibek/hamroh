@@ -49,7 +49,7 @@ def test_from_env_applies_explicit_codex_runtime_settings(
 ) -> None:
     _required_env(monkeypatch, tmp_path)
     monkeypatch.setenv("HAMROH_PROVIDER", "CODEX")
-    monkeypatch.setenv("HAMROH_MODEL", "gpt-test-codex")
+    monkeypatch.setenv("HAMROH_MODEL", "gpt-5.6-sol")
     monkeypatch.setenv("HAMROH_EFFORT", "medium")
     monkeypatch.setenv("CODEX_BIN", "/opt/codex/bin/codex")
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "private-codex-home"))
@@ -58,7 +58,7 @@ def test_from_env_applies_explicit_codex_runtime_settings(
     config = Config.from_env()
 
     assert config.provider == "codex"
-    assert config.model == "gpt-test-codex"
+    assert config.model == "gpt-5.6-sol"
     assert config.effort == "medium"
     assert config.codex_bin == "/opt/codex/bin/codex"
     assert config.codex_home == (tmp_path / "private-codex-home").resolve()

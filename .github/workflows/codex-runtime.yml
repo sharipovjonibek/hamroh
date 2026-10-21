@@ -1,0 +1,22 @@
+name: Codex runtime
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install uv==0.11.29
+      - run: uv sync --frozen --extra dev
+      - run: >-
+          uv run --frozen python -m pytest --reruns 0
+          tests/unit/test_codex_worker.py tests/unit/test_codex_startup.py
+          tests/unit/test_codex_login.py tests/unit/test_api_error_turn.py
+          tests/unit/test_reset_session.py tests/unit/test_recovery_and_limits.py

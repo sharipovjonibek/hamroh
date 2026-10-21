@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import time
-from collections import deque
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -105,45 +104,6 @@ def _unwrap_item(item: ThreadItem | Any) -> Any:
 def _is_stale_thread_error(exc: BaseException) -> bool:
     message = str(exc).lower()
     return any(marker in message for marker in _STALE_THREAD_MARKERS)
-
-
-def _patch_sdk_early_completion_race(runtime: AsyncCodex) -> None:
-    """Retain terminal notifications emitted before turn registration.
-
-    ``openai-codex==0.1.0b3`` buffers early item notifications but discards
-    that buffer when an early ``turn/completed`` arrives. A fast response can
-    therefore leave ``AsyncTurnHandle.stream()`` waiting forever. The project
-    intentionally pins that SDK build, so patch its per-client router until an
-    upstream release containing the fix is adopted. Unknown/fake clients are
-    left untouched.
-    """
-
-    try:
-        router = runtime._client._sync._router  # type: ignore[attr-defined]
-    except AttributeError:
-        return
-    if getattr(router, "_hamroh_early_completion_fix", False):
-        return
-
-    original = router.route_notification
-
-    def route_notification(notification: Notification) -> None:
-        if notification.method == "turn/completed":
-            turn_id = router._notification_turn_id(notification)
-            if turn_id is not None:
-                with router._lock:
-                    turn_queue = router._turn_notifications.get(turn_id)
-                    if turn_queue is None:
-                        router._pending_turn_notifications.setdefault(
-                            turn_id, deque()
-                        ).append(notification)
-                        return
-                turn_queue.put(notification)
-                return
-        original(notification)
-
-    setattr(router, "route_notification", route_notification)
-    setattr(router, "_hamroh_early_completion_fix", True)
 
 
 def _install_fail_closed_approval_handler(runtime: AsyncCodex) -> None:
@@ -263,7 +223,6 @@ class CodexWorker:
                 client_title=f"{self._agent_name} Telegram Agent",
             )
         )
-        _patch_sdk_early_completion_race(runtime)
         _install_fail_closed_approval_handler(runtime)
         try:
             await asyncio.wait_for(
@@ -563,7 +522,7 @@ class CodexWorker:
                 if completed:
                     break
             if not completed and generation == self._generation:
-                self._finish_api_error("Codex turn ended without a completion event")
+                raise RuntimeError("Codex turn ended without a completion event")
         except asyncio.CancelledError:
             raise
         except TransportClosedError as exc:
@@ -575,16 +534,14 @@ class CodexWorker:
         except Exception as exc:
             if generation == self._generation:
                 log.exception("Codex turn failed")
-                if handle is None:
-                    # turn/start never returned a handle, so the model may not
-                    # have accepted the message. Preserve reminder at-least-
-                    # once semantics and reconnect the runtime.
-                    self._finish_worker_error(exc)
-                    self._runtime_error = exc
-                    self._running = False
-                    self._runtime_failed.set()
-                else:
-                    self._finish_api_error(str(exc) or type(exc).__name__)
+                # API rejections arrive as typed error/turn notifications.
+                # An exception from turn/start or the SDK stream means the
+                # client is broken. Reconnect it instead of asking the dead
+                # connection to create a new session (which can time out).
+                self._finish_worker_error(exc)
+                self._runtime_error = exc
+                self._running = False
+                self._runtime_failed.set()
         finally:
             if generation == self._generation:
                 self._active_turn = None
@@ -723,17 +680,6 @@ class CodexWorker:
         self._result_queue.put_nowait(result)
         self._current_result = None
 
-    def _finish_api_error(self, message: str) -> None:
-        result = self._current_result or TurnResult()
-        result.api_error = message
-        result.dropped_text = (
-            bool(result.text_blocks) and not result.user_visible_action
-        )
-        self._active_turn = None
-        self._turn_task = None
-        self._result_queue.put_nowait(result)
-        self._current_result = None
-
     def _finish_worker_error(self, exc: BaseException) -> None:
         """Unblock Engine via its crash path, never its API-reset path."""
 
@@ -855,5 +801,4 @@ __all__ = [
     "CodexWorker",
     "USER_VISIBLE_HAMROH_TOOLS",
     "_install_fail_closed_approval_handler",
-    "_patch_sdk_early_completion_race",
 ]

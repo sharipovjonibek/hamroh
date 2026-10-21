@@ -11,7 +11,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from openai_codex._message_router import MessageRouter
 from openai_codex.generated.v2_all import (
     AgentMessageThreadItem,
     ItemCompletedNotification,
@@ -33,10 +32,7 @@ from hamroh.codex_worker import (
     WorkerHooks,
     compose_developer_instructions,
 )
-from hamroh.codex_worker.worker import (
-    _install_fail_closed_approval_handler,
-    _patch_sdk_early_completion_race,
-)
+from hamroh.codex_worker.worker import _install_fail_closed_approval_handler
 from hamroh.config import Config
 
 
@@ -301,18 +297,130 @@ async def test_stale_thread_falls_back_and_calls_hook(tmp_path: Path) -> None:
     await worker.stop()
 
 
-def test_sdk_compat_keeps_completion_that_arrives_before_registration() -> None:
-    router = MessageRouter()
-    runtime = SimpleNamespace(
-        _client=SimpleNamespace(_sync=SimpleNamespace(_router=router))
+async def test_start_leaves_sdk_notification_router_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The former beta-SDK patch replaced this method and accessed router
+    # fields that no longer exist in 0.163.0, killing the reader thread.
+    def route_notification(_event: object) -> None:
+        pass
+
+    router = SimpleNamespace(route_notification=route_notification)
+    client = SimpleNamespace(_router=router)
+    monkeypatch.setattr(
+        _FakeCodex, "_client", SimpleNamespace(_sync=client), raising=False
     )
-    _patch_sdk_early_completion_race(runtime)  # type: ignore[arg-type]
+    worker = CodexWorker(_spec(tmp_path), Config.for_test(tmp_path))
+    await worker.start()
+
+    assert router.route_notification is route_notification
+    await worker.stop()
+
+
+@pytest.mark.parametrize("broken_stream", [True, False])
+async def test_sdk_stream_failure_reconnects_without_resetting_saved_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, broken_stream: bool
+) -> None:
+    async def stream():
+        yield _events()[0]
+        if broken_stream:
+            raise AttributeError("SDK notification router failed")
+
+    monkeypatch.setattr(_FakeCodex.thread.handle, "stream", stream)
+    cfg = dataclasses.replace(Config.for_test(tmp_path), crash_backoff_base=0)
+    worker = CodexWorker(_spec(tmp_path), cfg)
+    await worker.start()
+    original_client = _FakeCodex.instances[0]
+    saved_id = cfg.session_id_path.read_text(encoding="utf-8")
+    await worker.send("incoming Telegram envelope")
+    message = "SDK notification router failed" if broken_stream else "completion event"
+    with pytest.raises(RuntimeError, match=message):
+        await asyncio.wait_for(worker.wait_for_result(), timeout=1)
+
+    assert not worker.is_running
+    assert worker._runtime_failed.is_set()
+    assert cfg.session_id_path.read_text(encoding="utf-8") == saved_id
+
+    # The supervisor replaces the dead SDK process and resumes the same
+    # conversation instead of issuing thread/start on the broken client.
+    await worker.supervise()
+
+    async def wait_for_reconnect() -> None:
+        while not worker.is_running:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_reconnect(), timeout=1)
+    assert original_client.closed
+    assert len(original_client.started) == 1
+    assert _FakeCodex.instances[-1].resumed[0][0] == "thread-new"
+    assert cfg.session_id_path.read_text(encoding="utf-8") == saved_id
+    await worker.stop()
+
+
+async def test_typed_api_failure_keeps_runtime_available_for_session_reset(
+    tmp_path: Path,
+) -> None:
     completed = _events()[-1]
+    completed.payload.turn.status = TurnStatus.failed
+    _FakeCodex.thread.handle.events = [completed]
+    worker = CodexWorker(_spec(tmp_path), Config.for_test(tmp_path))
+    await worker.start()
+    await worker.send("request rejected by the model")
 
-    router.route_notification(completed)
-    router.register_turn("turn-1")
+    result = await asyncio.wait_for(worker.wait_for_result(), timeout=1)
 
-    assert router.next_turn_notification("turn-1") is completed
+    assert result.api_error == "Codex turn failed"
+    assert worker.is_running
+    assert not worker._runtime_failed.is_set()
+    await worker.reset_session()
+    assert len(_FakeCodex.instances[0].started) == 2
+    await worker.stop()
+
+
+async def test_session_reset_timeout_marks_runtime_for_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hamroh.codex_worker.worker as worker_module
+
+    worker = CodexWorker(_spec(tmp_path), Config.for_test(tmp_path))
+    await worker.start()
+    auth = tmp_path / "codex-home/auth.json"
+    auth.write_text("existing auth cache", encoding="utf-8")
+
+    async def wedged_start(**_kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(worker._client, "thread_start", wedged_start)
+    monkeypatch.setattr(worker_module, "_RPC_TIMEOUT_SECONDS", 0.01)
+    with pytest.raises(RuntimeError, match="runtime failed during session reset"):
+        await worker.reset_session()
+
+    assert not worker.is_running
+    assert worker._runtime_failed.is_set()
+    assert auth.read_text() == "existing auth cache"
+    await worker.stop()
+
+
+async def test_explicit_gpt_5_6_model_survives_turn_and_session_reset(
+    tmp_path: Path,
+) -> None:
+    cfg = Config.for_test(tmp_path)
+    spec = dataclasses.replace(_spec(tmp_path), model="gpt-5.6-sol")
+    worker = CodexWorker(spec, cfg)
+    await worker.start()
+    await worker.send("incoming Telegram envelope")
+    await asyncio.wait_for(worker.wait_for_result(), timeout=1)
+    assert _FakeCodex.thread.turn_calls[0][1]["model"] == "gpt-5.6-sol"
+
+    _FakeCodex.thread = _FakeThread("thread-reset", _FakeHandle(_events()))
+    await worker.reset_session()
+
+    assert all(
+        call["model"] == "gpt-5.6-sol" for call in _FakeCodex.instances[0].started
+    )
+    assert worker.session_id == "thread-reset"
+    assert cfg.session_id_path.read_text().strip() == "thread-reset"
+    await worker.stop()
 
 
 def test_unexpected_sdk_approvals_fail_closed() -> None:
