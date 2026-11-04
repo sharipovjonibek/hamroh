@@ -9,11 +9,13 @@ Results are capped at 100 rows; text columns are truncated to 2000 chars.
 from __future__ import annotations
 
 
-import sqlglot
-from sqlglot import exp
+from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from .base import BaseTool, ToolResult
+
+if TYPE_CHECKING:
+    from sqlglot import exp
 
 ROW_CAP = 100
 TEXT_TRUNCATE = 2000
@@ -25,6 +27,9 @@ def parse_safe_select(sql: str) -> exp.Select | None:
     Returns ``None`` for anything else: multiple statements, non-SELECT roots,
     or trees containing mutation/PRAGMA/ATTACH/etc.
     """
+    import sqlglot
+    from sqlglot import exp
+
     if not isinstance(sql, str) or not sql.strip():
         return None
     try:
@@ -70,6 +75,8 @@ def cap_limit(stmt: exp.Select, row_cap: int) -> exp.Select:
     - Existing literal LIMIT > row_cap, or non-literal expression → overwrites
       with ``LIMIT row_cap``.
     """
+    from sqlglot import exp
+
     existing = stmt.args.get("limit")
     if existing is None:
         return stmt.limit(row_cap, copy=False)

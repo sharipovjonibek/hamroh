@@ -90,6 +90,9 @@ Use as an **automation layer.** Wire up MCPs and schedule agents to do real work
 
 ## Configuration
 
+For idle RAM/CPU diagnostics and runtime retention settings, see
+[resource usage and lifecycle](docs/resource-usage.md).
+
 > **This README is the high-level intro.** Deeper material lives in
 > [docs/](docs/) — full technical manual, deployment walkthrough, tools
 > reference, and the systems hamroh descends from. Start at

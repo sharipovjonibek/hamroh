@@ -1,23 +1,14 @@
-"""Warm Chromium manager (headless by default) shared across render + browser calls.
-
-Launching Playwright's node driver plus a fresh Chromium per render costs
-~0.6-1.4s of pure overhead (issue #64). This keeps ONE Chromium process
-warm for the bot's lifetime and hands out a fresh, isolated ``context()``
-per render so renders never share cookies/cache/state.
-
-Only the *context* is closed after each render; the browser stays up. A
-crashed/disconnected browser is detected via ``is_connected`` and
-relaunched on the next render. One browser only — no pool.
-"""
+"""Lazy shared Chromium with bounded idle retention and isolated contexts."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
 from ..base import ArgsT, BaseTool, ToolResult
+from ...helpers.lifecycle import await_close, begin_close
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from playwright.async_api import (
@@ -42,17 +33,71 @@ _CLOSE_TIMEOUT_S = 5.0
 class BrowserManager:
     """Owns a single warm Chromium process; serializes (re)launch.
 
-    Lazily launches on first ``context()`` (or eagerly via ``warm()``),
-    stays alive, relaunches if Chromium dies, and is torn down once via
-    ``close()`` at shutdown. All launch/relaunch goes through ``_lock`` so
-    two concurrent renders can't double-launch.
+    Launches on demand, reuses Chromium across adjacent renders, and closes
+    it after the idle budget when no contexts remain. Interactive sessions
+    retain their context until reset/close. Launch and retirement share one
+    lock so concurrent renders cannot double-launch or use a closing browser.
     """
 
-    def __init__(self, *, headless: bool = True) -> None:
+    def __init__(
+        self, *, headless: bool = True, idle_timeout: float = 60,
+        on_resource_event: Callable[[str], None] | None = None,
+    ) -> None:
         self._pw: Playwright | None = None
         self._browser: Browser | None = None
         self._headless = headless
         self._lock = asyncio.Lock()
+        self._contexts: set[BrowserContext] = set()
+        self._idle_timeout = idle_timeout
+        self._idle_handle: asyncio.TimerHandle | None = None
+        self._idle_task: asyncio.Task | None = None
+        self._driver_stop_task: asyncio.Task | None = None
+        self._on_resource_event = on_resource_event
+        self._retiring = False
+
+    @property
+    def resource_state(self) -> dict:
+        return {
+            "connected": self._browser is not None and self._browser.is_connected(),
+            "contexts": len(self._contexts),
+            "idle_close_pending": self._idle_handle is not None,
+            "retiring": self._retiring,
+        }
+
+    def _record_resources(self, event: str) -> None:
+        if self._on_resource_event is not None:
+            try:
+                self._on_resource_event(event)
+            except Exception:
+                pass
+
+    def _cancel_idle(self) -> None:
+        if self._idle_handle is not None:
+            self._idle_handle.cancel()
+            self._idle_handle = None
+
+    def _arm_idle(self) -> None:
+        self._cancel_idle()
+        if self._idle_timeout > 0 and self._browser is not None and not self._contexts:
+            self._idle_handle = asyncio.get_running_loop().call_later(
+                self._idle_timeout, self._schedule_idle_close
+            )
+
+    def _schedule_idle_close(self) -> None:
+        self._idle_handle = None
+        if self._idle_task is None or self._idle_task.done():
+            self._idle_task = asyncio.create_task(self._close_if_unused(), name="browser-idle")
+
+    async def _close_if_unused(self) -> None:
+        async with self._lock:
+            if not self._contexts:
+                try:
+                    await self._drop_dead_browser()
+                except Exception:
+                    log.warning("browser idle cleanup incomplete; retaining driver for retry")
+                    self._arm_idle()
+                else:
+                    self._record_resources("browser_idle_closed")
 
     async def warm(self) -> None:
         """Launch the browser ahead of the first render.
@@ -76,14 +121,13 @@ class BrowserManager:
         cache bleed between renders. The ``finally`` closes the context with a
         bounded budget; the warm browser survives regardless.
         """
-        browser = await self._ensure_browser()
-        ctx = await browser.new_context(
+        ctx = await self.open_context(
             viewport=viewport, java_script_enabled=java_script_enabled
         )
         try:
             yield ctx
         finally:
-            await _safe_close(ctx, "render context")
+            await self.release_context(ctx)
 
     async def open_context(
         self, *, viewport: ViewportSize, java_script_enabled: bool = True
@@ -95,16 +139,36 @@ class BrowserManager:
         across many tool calls and closes it at shutdown. Same warm
         Chromium backs both, so no second browser is launched.
         """
-        browser = await self._ensure_browser()
-        return await browser.new_context(
-            viewport=viewport, java_script_enabled=java_script_enabled
-        )
+        async with self._lock:
+            browser = await self._ensure_browser_locked()
+            ctx = await browser.new_context(
+                viewport=viewport, java_script_enabled=java_script_enabled
+            )
+            self._contexts.add(ctx)
+            ctx.on("close", lambda *_args: self._context_closed(ctx))
+            self._cancel_idle()
+            return ctx
+
+    def _context_closed(self, ctx: BrowserContext) -> None:
+        self._contexts.discard(ctx)
+        self._arm_idle()
+
+    async def release_context(self, ctx: BrowserContext) -> None:
+        try:
+            await _safe_close(ctx, "browser context")
+        finally:
+            self._context_closed(ctx)
 
     async def close(self) -> None:
         """Tear down browser + driver. Idempotent — shutdown calls it, and a
         prior crash may already have nulled them."""
         async with self._lock:
+            self._cancel_idle()
             await self._drop_dead_browser()
+        task = self._idle_task
+        if task is not None and task is not asyncio.current_task():
+            await task
+        self._idle_task = None
 
     async def _ensure_browser(self) -> Browser:
         """Return a connected browser, launching/relaunching as needed.
@@ -114,23 +178,49 @@ class BrowserManager:
         (Chromium crashed) is dropped and relaunched.
         """
         async with self._lock:
-            if self._browser is not None and self._browser.is_connected():
-                return self._browser
-            await self._drop_dead_browser()
-            from playwright.async_api import async_playwright  # heavy; local
+            return await self._ensure_browser_locked()
 
+    async def _ensure_browser_locked(self) -> Browser:
+        if not self._retiring and self._browser is not None and self._browser.is_connected():
+            return self._browser
+        await self._drop_dead_browser()
+        from playwright.async_api import async_playwright  # heavy; local
+
+        try:
             self._pw = await async_playwright().start()
             self._browser = await self._pw.chromium.launch(headless=self._headless)
-            log.info("warm chromium launched (headless=%s)", self._headless)
-            return self._browser
+        except BaseException:
+            # A failed/cancelled launch still owns a Node driver.
+            await self._drop_dead_browser()
+            raise
+        self._arm_idle()
+        self._record_resources("browser_started")
+        log.info("chromium launched on demand (headless=%s)", self._headless)
+        return self._browser
 
     async def _drop_dead_browser(self) -> None:
         """Release a dead/stale browser + driver before relaunch or shutdown.
-        Best effort — errors are logged only, never raised."""
-        await _safe_close(self._browser, "browser")
-        await _safe_stop(self._pw)
-        self._browser = None
-        self._pw = None
+        Keep ownership if driver shutdown cannot yet be confirmed."""
+        self._cancel_idle()
+        self._retiring = True
+        try:
+            await _safe_close(self._browser, "browser")
+        finally:
+            if self._pw is not None:
+                self._driver_stop_task = begin_close(
+                    self._driver_stop_task, self._pw.stop, name="playwright-close"
+                )
+                try:
+                    await await_close(self._driver_stop_task, timeout=_CLOSE_TIMEOUT_S)
+                except Exception as exc:
+                    # Retain both the driver and its still-running stop task.
+                    raise RuntimeError("Playwright driver shutdown not confirmed; will retry") from exc
+            self._browser = None
+            self._pw = None
+            self._driver_stop_task = None
+            self._contexts.clear()
+            self._cancel_idle()
+            self._retiring = False
 
 
 async def _safe_close(
@@ -147,16 +237,6 @@ async def _safe_close(
         await asyncio.wait_for(obj.close(), timeout=timeout)
     except (asyncio.TimeoutError, Exception) as exc:
         log.warning("%s.close hung/failed: %s: %s", label, type(exc).__name__, exc)
-
-
-async def _safe_stop(pw: Any) -> None:
-    """Stop the Playwright driver; log, never raise."""
-    if pw is None:
-        return
-    try:
-        await pw.stop()
-    except Exception as exc:
-        log.warning("playwright.stop failed: %s: %s", type(exc).__name__, exc)
 
 
 class BrowserSession:
@@ -186,9 +266,17 @@ class BrowserSession:
             live = self._live_page()
             if live is not None:
                 return live
+            if self._context is not None:
+                await self._manager.release_context(self._context)
+                self._context = None
             self._context = await self._manager.open_context(viewport=_SESSION_VIEWPORT)
-            self._context.on("page", self._adopt)  # follow popups / new tabs
-            self._page = await self._context.new_page()
+            try:
+                self._context.on("page", self._adopt)  # follow popups / new tabs
+                self._page = await self._context.new_page()
+            except BaseException:
+                await self._manager.release_context(self._context)
+                self._context = None
+                raise
             return self._page
 
     def require_page(self) -> Page:
@@ -205,9 +293,10 @@ class BrowserSession:
 
     async def close(self) -> None:
         """Close the session context (not the warm browser). Idempotent."""
-        await _safe_close(self._context, "browser session context")
-        self._context = None
-        self._page = None
+        async with self._lock:
+            context, self._context, self._page = self._context, None, None
+            if context is not None:
+                await self._manager.release_context(context)
 
     def _adopt(self, page: Page) -> None:
         """Make a newly-opened tab (popup / ``target=_blank``) the active page,

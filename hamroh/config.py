@@ -7,6 +7,7 @@ their own ``Config`` without touching environment variables.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import unicodedata
@@ -62,6 +63,13 @@ def _bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _nonnegative_seconds(name: str, default: float) -> float:
+    value = _float(name, default)
+    if not math.isfinite(value) or value < 0:
+        raise RuntimeError(f"{name} must be a finite number >= 0")
+    return value
 
 
 def _choice(name: str, default: str, allowed: tuple[str, ...]) -> str:
@@ -237,6 +245,19 @@ class Config:
     #: supplies its matching runtime.
     #: Env var: ``CODEX_BIN``.
     codex_bin: str | None = None
+    #: Start Codex on the first message instead of occupying RAM from boot.
+    codex_lazy_start: bool = True
+    #: Release idle app-server/MCP processes; 0 keeps the runtime warm.
+    codex_idle_timeout_seconds: float = 120.0
+    #: Bound SDK/thread/notification retention across continuously busy turns.
+    #: Recycling happens before the next turn and resumes the saved thread.
+    codex_max_turns: int = 32
+    #: Release Chromium/Playwright when no browser contexts remain; 0 disables.
+    browser_idle_timeout_seconds: float = 60.0
+    #: Periodic process/RSS snapshots; lifecycle snapshots remain enabled at 0.
+    resource_sample_interval_seconds: float = 300.0
+    #: Optional Python allocation tracing; disabled to avoid tracing overhead.
+    resource_trace_heap: bool = False
 
     # Derived paths
     db_path: Path = field(init=False)
@@ -324,7 +345,15 @@ class Config:
             ),
             provider=provider,
             codex_bin=_env("CODEX_BIN"),
+            codex_lazy_start=_bool("HAMROH_CODEX_LAZY_START", True),
+            codex_idle_timeout_seconds=_nonnegative_seconds("HAMROH_CODEX_IDLE_SECONDS", 120),
+            codex_max_turns=_int("HAMROH_CODEX_MAX_TURNS", 32),
+            browser_idle_timeout_seconds=_nonnegative_seconds("HAMROH_BROWSER_IDLE_SECONDS", 60),
+            resource_sample_interval_seconds=_nonnegative_seconds("HAMROH_RESOURCE_INTERVAL_SECONDS", 300),
+            resource_trace_heap=_bool("HAMROH_RESOURCE_TRACE_HEAP", False),
         )
+        if cfg.codex_max_turns < 0:
+            raise RuntimeError("HAMROH_CODEX_MAX_TURNS must be >= 0")
         cls._apply_env_path_overrides(cfg)
         return cfg
 
@@ -390,6 +419,7 @@ class Config:
             log_level="INFO",
             log_transcript="compact",
             provider="claude",
+            codex_lazy_start=False,
         )
         cls._override_test_paths(cfg, data_dir.resolve())
         return cfg

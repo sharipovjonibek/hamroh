@@ -45,3 +45,19 @@ async def test_mcp_config_file_round_trips() -> None:
         assert f":{server.port}/mcp" in text
     finally:
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_repeated_runtime_connections_do_not_create_mcp_sessions() -> None:
+    server = McpServer(ToolContext())
+    await server.start()
+    try:
+        for _ in range(5):
+            async with streamable_http_client(server.url) as (read, write, session_id):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool("time_now", {})
+                    assert not result.isError
+                    assert session_id() is None
+    finally:
+        await server.stop()

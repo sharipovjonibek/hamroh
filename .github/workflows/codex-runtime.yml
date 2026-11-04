@@ -17,6 +17,4 @@ jobs:
       - run: uv sync --frozen --extra dev
       - run: >-
           uv run --frozen python -m pytest --reruns 0
-          tests/unit/test_codex_worker.py tests/unit/test_codex_startup.py
-          tests/unit/test_codex_login.py tests/unit/test_api_error_turn.py
-          tests/unit/test_reset_session.py tests/unit/test_recovery_and_limits.py
+          tests/unit

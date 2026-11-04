@@ -64,6 +64,7 @@ class WorkerHooks:
     on_crash: OnCrash = None
     on_giveup: OnGiveup = None
     on_stale_session: OnStaleSession = None
+    on_resource_event: Callable[[str], None] | None = None
 
 
 # Pinned to the parent package name so log captures keyed on

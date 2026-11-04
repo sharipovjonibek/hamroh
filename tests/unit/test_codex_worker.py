@@ -373,7 +373,9 @@ async def test_typed_api_failure_keeps_runtime_available_for_session_reset(
     assert worker.is_running
     assert not worker._runtime_failed.is_set()
     await worker.reset_session()
-    assert len(_FakeCodex.instances[0].started) == 2
+    assert _FakeCodex.instances[0].closed
+    assert len(_FakeCodex.instances) == 2
+    assert len(_FakeCodex.instances[-1].started) == 1
     await worker.stop()
 
 
@@ -390,7 +392,7 @@ async def test_session_reset_timeout_marks_runtime_for_recovery(
     async def wedged_start(**_kwargs):
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(worker._client, "thread_start", wedged_start)
+    monkeypatch.setattr(_FakeCodex, "thread_start", lambda self, **kwargs: wedged_start(**kwargs))
     monkeypatch.setattr(worker_module, "_RPC_TIMEOUT_SECONDS", 0.01)
     with pytest.raises(RuntimeError, match="runtime failed during session reset"):
         await worker.reset_session()
@@ -398,6 +400,168 @@ async def test_session_reset_timeout_marks_runtime_for_recovery(
     assert not worker.is_running
     assert worker._runtime_failed.is_set()
     assert auth.read_text() == "existing auth cache"
+    await worker.stop()
+
+
+async def test_lazy_worker_starts_without_a_codex_process_and_wakes_saved_thread(tmp_path):
+    cfg = dataclasses.replace(Config.for_test(tmp_path), codex_lazy_start=True)
+    worker = CodexWorker(_spec(tmp_path, session_id="saved-thread"), cfg)
+    await worker.start()
+    assert worker.is_running
+    assert worker.resource_state["state"] == "standby"
+    assert _FakeCodex.instances == []
+    await worker.send("wake")
+    task = worker._turn_task
+    await asyncio.wait_for(worker.wait_for_result(), timeout=1)
+    await task
+    assert _FakeCodex.instances[0].resumed[0][0] == "saved-thread"
+    assert worker._seen_item_ids == worker._started_item_ids == set()
+    await worker.stop()
+
+
+async def test_idle_runtime_closes_and_next_turn_resumes_without_auth_changes(tmp_path):
+    cfg = dataclasses.replace(
+        Config.for_test(tmp_path), codex_lazy_start=True, codex_idle_timeout_seconds=0.01
+    )
+    idle = asyncio.Event()
+    worker = CodexWorker(
+        _spec(tmp_path), cfg,
+        WorkerHooks(on_resource_event=lambda event: idle.set() if event == "codex_idle_closed" else None),
+    )
+    await worker.start()
+    await worker.supervise()
+    await worker.send("first")
+    await asyncio.wait_for(worker.wait_for_result(), timeout=1)
+    auth = tmp_path / "codex-home/auth.json"
+    auth.write_text("unchanged login")
+    saved = cfg.session_id_path.read_bytes()
+    await asyncio.wait_for(idle.wait(), timeout=1)
+    assert _FakeCodex.instances[0].closed
+    assert worker._client is None
+    assert worker.is_running  # Engine requeue must be able to wake standby.
+    assert cfg.session_id_path.read_bytes() == saved
+    await worker.send("second")
+    await asyncio.wait_for(worker.wait_for_result(), timeout=1)
+    assert len(_FakeCodex.instances) == 2
+    assert _FakeCodex.instances[-1].resumed[0][0] == "thread-new"
+    assert auth.read_text() == "unchanged login"
+    assert cfg.session_id_path.read_bytes() == saved
+    await worker.stop()
+
+
+async def test_idle_policy_does_not_interrupt_an_active_turn(tmp_path):
+    cfg = dataclasses.replace(Config.for_test(tmp_path), codex_idle_timeout_seconds=0.01)
+    handle = _FakeCodex.thread.handle
+    handle.release.clear()
+    worker = CodexWorker(_spec(tmp_path), cfg)
+    await worker.start()
+    await worker.supervise()
+    await worker.send("long turn")
+    await asyncio.wait_for(handle.stream_started.wait(), timeout=1)
+    await asyncio.sleep(0.03)
+    assert not _FakeCodex.instances[0].closed
+    handle.release.set()
+    await asyncio.wait_for(worker.wait_for_result(), timeout=1)
+    await worker.stop()
+
+
+async def test_liveness_aborted_turn_can_still_return_to_idle_standby(tmp_path):
+    cfg = dataclasses.replace(
+        Config.for_test(tmp_path), codex_idle_timeout_seconds=0.01,
+        liveness_timeout_seconds=0.01, liveness_poll_seconds=0.005,
+    )
+    _FakeCodex.thread.handle.release.clear()
+    idle = asyncio.Event()
+    worker = CodexWorker(
+        _spec(tmp_path), cfg,
+        WorkerHooks(on_resource_event=lambda event: idle.set() if event == "codex_idle_closed" else None),
+    )
+    await worker.start()
+    await worker.supervise()
+    await worker.send("wedged turn")
+    result = await asyncio.wait_for(worker.wait_for_result(), timeout=1)
+    assert result.aborted_reason == "liveness-wedge"
+    await asyncio.wait_for(idle.wait(), timeout=1)
+    assert _FakeCodex.instances[0].closed
+    assert worker.resource_state["state"] == "standby"
+    await worker.stop()
+
+
+async def test_cancelled_start_closes_its_partially_initialized_client(tmp_path, monkeypatch):
+    entered = asyncio.Event()
+
+    async def starting(self):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(_FakeCodex, "__aenter__", starting)
+    worker = CodexWorker(_spec(tmp_path), Config.for_test(tmp_path))
+    task = asyncio.create_task(worker.start())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _FakeCodex.instances[0].closed
+    assert worker._client is None
+    await worker.stop()
+
+
+async def test_close_timeout_retains_client_and_prevents_overlapping_replacement(tmp_path, monkeypatch):
+    import hamroh.codex_worker.worker as worker_module
+
+    release = asyncio.Event()
+
+    async def closing(self):
+        await release.wait()
+        self.closed = True
+
+    monkeypatch.setattr(_FakeCodex, "close", closing)
+    monkeypatch.setattr(worker_module, "_CONTROL_RPC_TIMEOUT_SECONDS", 0.01)
+    worker = CodexWorker(_spec(tmp_path), Config.for_test(tmp_path))
+    await worker.start()
+    original = worker._client
+    with pytest.raises(asyncio.TimeoutError):
+        await worker._close_runtime()
+    assert worker._client is original
+    assert not worker._close_task.cancelled()
+    with pytest.raises(asyncio.TimeoutError):
+        await worker.start()
+    assert len(_FakeCodex.instances) == 1
+    release.set()
+    await worker.start()
+    assert original.closed
+    assert len(_FakeCodex.instances) == 2
+    await worker.stop()
+
+
+async def test_many_turns_release_item_caches_and_do_not_create_extra_clients(tmp_path):
+    worker = CodexWorker(_spec(tmp_path), Config.for_test(tmp_path))
+    await worker.start()
+    for _ in range(20):
+        await worker.send("message")
+        task = worker._turn_task
+        await asyncio.wait_for(worker.wait_for_result(), timeout=1)
+        await task
+        assert worker._seen_item_ids == worker._started_item_ids == set()
+        assert worker._active_turn is None
+        assert worker._result_queue.empty()
+    assert len(_FakeCodex.instances) == 1
+    await worker.stop()
+
+
+async def test_continuous_turns_recycle_client_with_same_persistent_thread(tmp_path):
+    cfg = dataclasses.replace(Config.for_test(tmp_path), codex_max_turns=2)
+    worker = CodexWorker(_spec(tmp_path), cfg)
+    await worker.start()
+    for _ in range(3):
+        await worker.send("message")
+        task = worker._turn_task
+        await asyncio.wait_for(worker.wait_for_result(), timeout=1)
+        await task
+    assert len(_FakeCodex.instances) == 2
+    assert _FakeCodex.instances[0].closed
+    assert _FakeCodex.instances[-1].resumed[0][0] == "thread-new"
+    assert worker.session_id == "thread-new"
     await worker.stop()
 
 

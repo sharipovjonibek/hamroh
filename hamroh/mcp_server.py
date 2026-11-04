@@ -175,7 +175,9 @@ def build_fastmcp(
                 f"plugins.json builtin_tools_disabled has unknown name(s): "
                 f"{sorted(unknown)}; available: {sorted(known)}"
             )
-    mcp = FastMCP(name=MCP_SERVER_NAME)
+    # Tools use the shared ToolContext, not per-connection MCP state or
+    # server-initiated sampling. Avoid retaining sessions across Codex wakes.
+    mcp = FastMCP(name=MCP_SERVER_NAME, stateless_http=True, json_response=True)
     instances: list[BaseTool] = []
     for cls in classes:
         if cls.name in disabled:

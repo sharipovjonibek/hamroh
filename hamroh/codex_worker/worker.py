@@ -41,6 +41,7 @@ from ..helpers.transcript import (
     log_cc_tool_use,
     log_cc_user,
 )
+from ..helpers.lifecycle import await_close, begin_close
 from ..models import ControlAction
 from ..tools.base import Heartbeat
 from .spec import CodexSpawnSpec, compose_developer_instructions, load_output_schema
@@ -133,7 +134,8 @@ def _install_fail_closed_approval_handler(runtime: AsyncCodex) -> None:
 class CodexWorker:
     """Run one persistent Codex thread and expose the legacy worker surface.
 
-    One SDK app-server process lives for the worker lifetime. Each ``send``
+    At most one SDK app-server process is live. Idle processes can be closed
+    and the same saved thread resumed on demand. Each ``send``
     starts a typed streaming turn; ``inject`` steers the active turn. Results
     use the shared :class:`hamroh.cc_worker.TurnResult`, so the engine does not
     need provider-specific control flow.
@@ -151,6 +153,11 @@ class CodexWorker:
         self._on_crash = hooks.on_crash
         self._on_giveup = hooks.on_giveup
         self._on_stale_session = hooks.on_stale_session
+        self._on_resource_event = hooks.on_resource_event
+        self._lazy_start = config.codex_lazy_start
+        self._idle_timeout = config.codex_idle_timeout_seconds
+        self._max_turns = config.codex_max_turns
+        self._turns_on_connection = 0
         self._session_id_path = config.session_id_path
         self._session_id = spec.session_id
         self._codex_home = spec.codex_home or getattr(config, "codex_home", None)
@@ -169,11 +176,13 @@ class CodexWorker:
         self._turn_task: asyncio.Task[None] | None = None
         self._supervisor_task: asyncio.Task[None] | None = None
         self._liveness_task: asyncio.Task[None] | None = None
+        self._idle_task: asyncio.Task[None] | None = None
+        self._close_task: asyncio.Task[None] | None = None
         self._result_queue: asyncio.Queue[TurnResult | Exception] = asyncio.Queue()
         self._current_result: TurnResult | None = None
         self._seen_item_ids: set[str] = set()
         self._started_item_ids: set[str] = set()
-        self._runtime_error: BaseException | None = None
+        self._runtime_error: str | None = None
         self._runtime_failed = asyncio.Event()
         self._stop_requested = asyncio.Event()
         self._connect_lock = asyncio.Lock()
@@ -181,6 +190,10 @@ class CodexWorker:
         self._generation = 0
         self._last_event_at = time.monotonic()
         self._running = False
+        self._standby = False
+        self._last_used_at = time.monotonic()
+        self._idle_activity = asyncio.Event()
+        self._connection_count = 0
         self._developer_instructions = ""
         self._output_schema: dict[str, Any] = {}
 
@@ -192,7 +205,43 @@ class CodexWorker:
 
     @property
     def is_running(self) -> bool:
-        return self._running and self._client is not None and self._thread is not None
+        # Engine readiness includes standby: a queued message must be allowed
+        # to wake the runtime instead of waiting forever for an idle process.
+        return self._running and (
+            self._standby or (self._client is not None and self._thread is not None)
+        )
+
+    @property
+    def resource_state(self) -> dict[str, Any]:
+        state = "ready" if self.is_running else "recovering"
+        if self._stop_requested.is_set():
+            state = "stopped"
+        elif self._close_task is not None:
+            state = "closing"
+        elif self._standby:
+            state = "standby"
+        elif self._current_result is not None:
+            state = "turn"
+        return {
+            "state": state, "connected": self._client is not None,
+            "connections": self._connection_count,
+            "turns_on_connection": self._turns_on_connection,
+            "saved_session": self._session_id is not None,
+            "queued_results": self._result_queue.qsize(),
+            "cached_item_ids": len(self._seen_item_ids) + len(self._started_item_ids),
+        }
+
+    def _record_resources(self, event: str) -> None:
+        if self._on_resource_event is not None:
+            with suppress(Exception):
+                self._on_resource_event(event)
+
+    def _release_turn_resources(self) -> None:
+        self._seen_item_ids.clear()
+        self._started_item_ids.clear()
+        self._last_used_at = time.monotonic()
+        self._idle_activity.set()
+        self._record_resources("after_turn")
 
     async def start(self) -> None:
         """Start the SDK runtime and create or resume the persistent thread."""
@@ -203,9 +252,20 @@ class CodexWorker:
             self._stop_requested.clear()
             self._developer_instructions = compose_developer_instructions(self.spec)
             self._output_schema = load_output_schema(self.spec)
-            await self._connect()
+            if self._lazy_start and self._client is None:
+                self._standby = True
+                self._running = True
+                log.info("Codex runtime in standby; starts on the next turn")
+            else:
+                await self._connect()
+            self._idle_activity.set()
 
     async def _connect(self) -> None:
+        # start(), recovery and wake-up share one lock. Never overwrite a live
+        # client, including one whose previous close timed out.
+        if self._client is not None:
+            await self._close_runtime()
+        self._standby = False
         if self._codex_home is not None:
             self._prepare_private_codex_home(self._codex_home)
 
@@ -224,21 +284,28 @@ class CodexWorker:
             )
         )
         _install_fail_closed_approval_handler(runtime)
+        self._client = runtime
         try:
             await asyncio.wait_for(
                 runtime.__aenter__(), timeout=_RPC_TIMEOUT_SECONDS
             )
             thread = await self._open_thread(runtime)
-        except Exception:
+        except BaseException:
+            # Cancellation during initialize/resume must close the process too.
             with suppress(Exception):
-                await runtime.close()
+                await self._close_runtime()
             raise
 
-        self._client = runtime
         self._thread = thread
         self._running = True
         self._runtime_error = None
         self._runtime_failed.clear()
+        self._last_used_at = time.monotonic()
+        self._connection_count += 1
+        self._turns_on_connection = 0
+        self._record_resources(
+            "codex_connected" if self._connection_count == 1 else "codex_reconnected"
+        )
         log.info(
             "Codex runtime ready (thread=%s model=%s effort=%s sandbox=%s)",
             thread.id,
@@ -354,6 +421,8 @@ class CodexWorker:
             self._liveness_task = asyncio.create_task(
                 self._liveness_loop(), name="codex-liveness"
             )
+        if self._idle_timeout > 0 and (self._idle_task is None or self._idle_task.done()):
+            self._idle_task = asyncio.create_task(self._idle_loop(), name="codex-idle")
 
     async def stop(self) -> None:
         self._stop_requested.set()
@@ -367,7 +436,7 @@ class CodexWorker:
                     active.interrupt(), timeout=_CONTROL_RPC_TIMEOUT_SECONDS
                 )
 
-        for task in (self._turn_task, self._liveness_task, self._supervisor_task):
+        for task in (self._turn_task, self._idle_task, self._liveness_task, self._supervisor_task):
             if (
                 task is not None
                 and not task.done()
@@ -378,27 +447,67 @@ class CodexWorker:
                     await task
         self._turn_task = None
         self._liveness_task = None
+        self._idle_task = None
         self._supervisor_task = None
         self._active_turn = None
         self._current_result = None
-        await self._close_runtime()
+        self._seen_item_ids.clear()
+        self._started_item_ids.clear()
+        self._standby = False
+        try:
+            await self._close_runtime()
+        except Exception:
+            log.exception("Codex close failed during shutdown")
 
     async def _close_runtime(self) -> None:
         runtime = self._client
-        self._client = None
-        self._thread = None
         self._running = False
         if runtime is not None:
-            with suppress(Exception):
-                await asyncio.wait_for(
-                    runtime.close(), timeout=_CONTROL_RPC_TIMEOUT_SECONDS
-                )
+            self._close_task = begin_close(
+                self._close_task, runtime.close, name="codex-close"
+            )
+            # A timeout must not cancel close(), lose the client reference, or
+            # allow a replacement process to overlap the old one.
+            await await_close(self._close_task, timeout=_CONTROL_RPC_TIMEOUT_SECONDS)
+            self._client = None
+            self._close_task = None
+        self._thread = None
+
+    async def _idle_loop(self) -> None:
+        while not self._stop_requested.is_set():
+            await self._idle_activity.wait()
+            self._idle_activity.clear()
+            if self._client is None or self._current_result is not None:
+                continue
+            remaining = self._idle_timeout - (time.monotonic() - self._last_used_at)
+            try:
+                await asyncio.wait_for(self._idle_activity.wait(), timeout=max(0, remaining))
+                continue
+            except asyncio.TimeoutError:
+                pass
+            async with self._connect_lock:
+                if self._current_result is not None or self._turn_task is not None:
+                    continue
+                if time.monotonic() - self._last_used_at < self._idle_timeout:
+                    self._idle_activity.set()
+                    continue
+                try:
+                    await self._close_runtime()
+                except Exception as exc:
+                    self._runtime_error = str(exc)
+                    self._runtime_failed.set()
+                    log.warning("Codex idle close failed; supervisor will retry")
+                    continue
+                self._standby = True
+                self._running = True
+                self._record_resources("codex_idle_closed")
+                log.info("Codex idle process closed; saved thread and auth retained")
 
     async def reset_session(self) -> None:
         """Interrupt the current turn and replace its thread with a fresh one."""
 
         async with self._connect_lock:
-            if self._client is None:
+            if not self.is_running:
                 raise RuntimeError("Codex worker not started")
             self._running = False
             self._generation += 1
@@ -423,32 +532,29 @@ class CodexWorker:
             self._current_result = None
             self._active_turn = None
             self._turn_task = None
-            self._session_id = None
-            self._session_id_path.unlink(missing_ok=True)
+            self._seen_item_ids.clear()
+            self._started_item_ids.clear()
             self._thread = None
             self._running = False
             try:
-                thread = await asyncio.wait_for(
-                    self._client.thread_start(
-                        ephemeral=False, **self._thread_options()
-                    ),
-                    timeout=_RPC_TIMEOUT_SECONDS,
-                )
+                # Replacing the process also releases the old loaded thread,
+                # subscriptions and per-thread MCP clients on explicit reset.
+                await self._close_runtime()
+                self._session_id = None
+                self._session_id_path.unlink(missing_ok=True)
+                await self._connect()
             except Exception as exc:
-                self._runtime_error = exc
+                self._runtime_error = str(exc)
                 self._runtime_failed.set()
                 raise RuntimeError("Codex runtime failed during session reset") from exc
-            self._thread = thread
-            self._running = True
-            self._session_id = thread.id
-            self._persist_session_id(thread.id)
-            log.warning("Codex session reset; new thread=%s", thread.id)
+            self._idle_activity.set()
+            log.warning("Codex session reset; new thread=%s", self._session_id)
 
     async def send(self, text: str) -> None:
         """Start one streamed Codex turn and return without waiting for it."""
 
         async with self._connect_lock:
-            if not self.is_running or self._thread is None:
+            if not self.is_running:
                 raise RuntimeError("Codex worker not started")
             if self._turn_task is not None and not self._turn_task.done():
                 raise RuntimeError("Codex worker already has a turn in progress")
@@ -459,6 +565,8 @@ class CodexWorker:
             self._seen_item_ids.clear()
             self._started_item_ids.clear()
             self._last_event_at = time.monotonic()
+            self._idle_activity.set()
+            self._record_resources("before_turn")
             log_cc_user(text)
             self._turn_task = asyncio.create_task(
                 self._run_turn(text, generation), name="codex-turn"
@@ -491,11 +599,18 @@ class CodexWorker:
         return result
 
     async def _run_turn(self, text: str, generation: int) -> None:
-        assert self._thread is not None
         handle: AsyncTurnHandle | None = None
+        stream = None
         try:
+            async with self._connect_lock:
+                recycle = self._max_turns > 0 and self._turns_on_connection >= self._max_turns
+                if self._standby or recycle:
+                    await self._connect()
+                thread = self._thread
+            if thread is None:
+                raise RuntimeError("Codex runtime is unavailable")
             handle = await asyncio.wait_for(
-                self._thread.turn(
+                thread.turn(
                     text,
                     approval_mode=ApprovalMode.deny_all,
                     effort=_effort(self.spec.effort),
@@ -514,7 +629,8 @@ class CodexWorker:
             self._active_turn = handle
 
             completed = False
-            async for event in handle.stream():
+            stream = handle.stream()
+            async for event in stream:
                 if generation != self._generation:
                     return
                 self._last_event_at = time.monotonic()
@@ -528,7 +644,7 @@ class CodexWorker:
         except TransportClosedError as exc:
             if generation == self._generation:
                 self._finish_worker_error(exc)
-                self._runtime_error = exc
+                self._runtime_error = str(exc)
                 self._running = False
                 self._runtime_failed.set()
         except Exception as exc:
@@ -539,12 +655,17 @@ class CodexWorker:
                 # client is broken. Reconnect it instead of asking the dead
                 # connection to create a new session (which can time out).
                 self._finish_worker_error(exc)
-                self._runtime_error = exc
+                self._runtime_error = str(exc)
                 self._running = False
                 self._runtime_failed.set()
         finally:
+            if stream is not None and hasattr(stream, "aclose"):
+                with suppress(Exception):
+                    await asyncio.wait_for(stream.aclose(), timeout=_CONTROL_RPC_TIMEOUT_SECONDS)
             if generation == self._generation:
                 self._active_turn = None
+                self._turn_task = None
+                self._release_turn_resources()
 
     def _handle_notification(self, event: Notification, turn_id: str) -> bool:
         payload = event.payload
@@ -659,6 +780,7 @@ class CodexWorker:
         if result is None:
             return
         turn = completed.turn
+        self._turns_on_connection += 1
         if turn.status == TurnStatus.failed:
             result.api_error = (
                 turn.error.message if turn.error is not None else "Codex turn failed"
@@ -720,8 +842,9 @@ class CodexWorker:
                 self._result_queue.put_nowait(partial)
                 self._turn_task = None
                 self._running = False
-                self._runtime_error = RuntimeError("Codex turn/start timed out")
+                self._runtime_error = "Codex turn/start timed out"
                 self._runtime_failed.set()
+                self._release_turn_resources()
                 continue
             log.error("Codex turn wedged: no activity for %.0fs; interrupting", silence)
             self._generation += 1
@@ -751,8 +874,9 @@ class CodexWorker:
             self._turn_task = None
             if interrupt_failed:
                 self._running = False
-                self._runtime_error = RuntimeError("Codex interrupt timed out")
+                self._runtime_error = "Codex interrupt timed out"
                 self._runtime_failed.set()
+            self._release_turn_resources()
 
     async def _supervise_loop(self) -> None:
         while not self._stop_requested.is_set():
@@ -789,12 +913,16 @@ class CodexWorker:
             except asyncio.TimeoutError:
                 pass
             async with self._connect_lock:
-                await self._close_runtime()
+                if self.is_running and not self._runtime_failed.is_set():
+                    continue  # another serialized start already recovered it
                 try:
+                    await self._close_runtime()
                     await self._connect()
                 except Exception as exc:
-                    self._runtime_error = exc
+                    self._runtime_error = str(exc)
                     self._runtime_failed.set()
+                finally:
+                    self._idle_activity.set()
 
 
 __all__ = [

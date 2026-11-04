@@ -37,6 +37,7 @@ from .db.reminders import (
 )
 from .engine import Engine, EngineOptions, ErrorNotify, TypingAction
 from .helpers.owner_log_notifier import attach_owner_log_notifier
+from .helpers.resources import ResourceMonitor
 from .storage.instructions_store import InstructionsStore
 from .mcp_server import McpServer
 from .plugins import Plugins, load_plugins
@@ -273,8 +274,7 @@ class _App:
     reminder_task: asyncio.Task | None = None
     browser_manager: BrowserManager | None = None
     browser_session: BrowserSession | None = None
-    #: Background task warming Chromium at boot; held so it isn't GC'd.
-    warm_task: asyncio.Task | None = None
+    resources: ResourceMonitor | None = None
     #: Open handle to ``data/.lock`` — held for the process lifetime so
     #: the flock stays alive. Released automatically on any exit.
     lock: IO[str] | None = None
@@ -360,7 +360,11 @@ async def _start_mcp_server(
     async def db_logger(**kwargs):  # called by every MCP tool wrapper
         await insert_tool_call(db, ToolCall(**kwargs))
 
-    browser_manager = BrowserManager(headless=app.config.browser_headless)
+    browser_manager = BrowserManager(
+        headless=app.config.browser_headless,
+        idle_timeout=app.config.browser_idle_timeout_seconds,
+        on_resource_event=app.resources.record if app.resources else None,
+    )
     ctx = ToolContext(
         bot=None,  # filled in once the dispatcher exists
         database=db,
@@ -714,13 +718,19 @@ async def _run_until_stopped(app: _App) -> None:
             )
             app.config.session_id_path.chmod(0o600)
         app.reminder_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await app.reminder_task
+        if app.resources is not None:
+            await app.resources.stop()
         await app.dispatcher.stop()
         await app.engine.stop()
         await app.worker.stop()
         await app.mcp.stop()
-        if app.browser_session is not None:
-            await app.browser_session.close()
-        if app.browser_manager is not None:
-            await app.browser_manager.close()
-        await app.db.close()
+        try:
+            if app.browser_session is not None:
+                await app.browser_session.close()
+            if app.browser_manager is not None:
+                await app.browser_manager.close()
+        finally:
+            await app.db.close()
         log.info("clean shutdown complete")

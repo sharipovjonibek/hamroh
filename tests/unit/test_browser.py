@@ -358,6 +358,97 @@ async def test_close_is_idempotent(
     assert browsers[0].closed is True, "close must tear the browser down"
 
 
+@pytest.mark.asyncio
+async def test_unused_browser_never_launches(fake_playwright):
+    chromium, _ = fake_playwright
+    manager = BrowserManager()
+    assert chromium.launch_count == 0
+    assert manager.resource_state["connected"] is False
+    await manager.close()
+    assert chromium.launch_count == 0
+
+
+@pytest.mark.asyncio
+async def test_idle_browser_closes_and_next_render_relaunches(fake_playwright):
+    chromium, browsers = fake_playwright
+    closed = asyncio.Event()
+    manager = BrowserManager(
+        idle_timeout=0.01,
+        on_resource_event=lambda event: closed.set() if event == "browser_idle_closed" else None,
+    )
+    async with manager.context(viewport=_VIEWPORT):
+        pass
+    await asyncio.wait_for(closed.wait(), timeout=1)
+    assert browsers[0].closed
+    assert manager.resource_state["contexts"] == 0
+    async with manager.context(viewport=_VIEWPORT):
+        pass
+    assert chromium.launch_count == 2
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_interactive_session_is_not_evicted_while_it_owns_a_context(fake_playwright):
+    _, browsers = fake_playwright
+    manager = BrowserManager(idle_timeout=0.01)
+    session = BrowserSession(manager)
+    first = await session.ensure_page()
+    await asyncio.sleep(0.03)
+    assert not browsers[0].closed
+    assert await session.ensure_page() is first
+    await session.close()
+    assert manager.resource_state["contexts"] == 0
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_browser_launch_stops_its_driver(fake_playwright, monkeypatch):
+    chromium, _ = fake_playwright
+    entered = asyncio.Event()
+
+    async def launch(**kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(chromium, "launch", launch)
+    manager = BrowserManager()
+    task = asyncio.create_task(manager.open_context(viewport=_VIEWPORT))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert manager._pw is None
+    assert manager._browser is None
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_driver_cleanup_does_not_launch_a_duplicate(fake_playwright, monkeypatch):
+    import hamroh.tools.browser.browser as module
+
+    chromium, _ = fake_playwright
+    manager = BrowserManager(idle_timeout=0)
+    async with manager.context(viewport=_VIEWPORT):
+        pass
+    driver = manager._pw
+    released = asyncio.Event()
+
+    async def stop():
+        await released.wait()
+
+    monkeypatch.setattr(driver, "stop", stop)
+    monkeypatch.setattr(module, "_CLOSE_TIMEOUT_S", 0.01)
+    with pytest.raises(RuntimeError, match="shutdown not confirmed"):
+        await manager.close()
+    with pytest.raises(RuntimeError, match="shutdown not confirmed"):
+        async with manager.context(viewport=_VIEWPORT):
+            pass
+    assert chromium.launch_count == 1
+    assert manager._pw is driver
+    released.set()
+    await manager.close()
+
+
 # ---------------------------------------------------------------------------
 # _safe_close — bounded, non-raising cleanup helper
 # ---------------------------------------------------------------------------

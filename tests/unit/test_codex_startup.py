@@ -89,7 +89,7 @@ async def test_startup_wires_generated_image_store_into_tool_context(
             return None
 
     monkeypatch.setattr(startup, "McpServer", FakeMcpServer)
-    app = SimpleNamespace(db=SimpleNamespace(), config=config)
+    app = SimpleNamespace(db=SimpleNamespace(), config=config, resources=None)
 
     ctx, _mcp = await startup._start_mcp_server(app, stores, plugins, {})
 

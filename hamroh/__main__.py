@@ -4,7 +4,7 @@ Brings up the four components in order:
 
 1. SQLite database (with migrations applied)
 2. Local MCP server on a random localhost port
-3. Codex SDK runtime (or the legacy Claude worker)
+3. Codex worker in standby (or the legacy Claude worker)
 4. Engine + Telegram dispatcher
 
 Then sleeps until interrupted, at which point everything is torn down.
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tracemalloc
 
 from .cc_worker import CcWorker, WorkerHooks
 from .codex_worker import CodexWorker
@@ -34,6 +35,7 @@ from .startup import (
     _start_mcp_server,
 )
 from .helpers.logging_setup import setup_logging
+from .helpers.resources import ResourceMonitor
 
 __all__ = ["main"]
 
@@ -44,26 +46,31 @@ async def _async_main() -> None:
     config = Config.from_env()
     config.ensure_dirs()
     setup_logging(config)
+    if config.resource_trace_heap:
+        tracemalloc.start(1)
     lock = _acquire_instance_lock(config)  # refuse to boot twice on one data dir
     _bootstrap_access(config)
 
     db, plugins, stores = await _open_db_and_stores(config)
     app = _App(config=config, db=db, lock=lock)
+    app.resources = ResourceMonitor(
+        lambda: {
+            "worker": getattr(app.worker, "resource_state", {}),
+            "browser": app.browser_manager.resource_state if app.browser_manager else {},
+        },
+        interval=config.resource_sample_interval_seconds,
+    )
 
     chat_titles: dict[int, str] = {}  # dispatcher writes, outbound tools read
     ctx, app.mcp = await _start_mcp_server(app, stores, plugins, chat_titles)
     app.browser_manager = ctx.browser_manager
     app.browser_session = ctx.browser_session
-    # Warm Chromium in the background so even the first render is fast.
-    if app.browser_manager is not None:
-        app.warm_task = asyncio.create_task(
-            app.browser_manager.warm(),
-            name="hamroh-browser-warm",
-        )
     spec = _build_worker_spec(config, plugins, app.mcp, stores)
     await _start_worker(app, ctx, spec)
     await _start_engine_and_dispatcher(app, stores, chat_titles, ctx)
     log.info("hamroh is live")
+    app.resources.record("boot")
+    app.resources.start()
 
     await _run_until_stopped(app)
 
@@ -79,6 +86,7 @@ async def _start_worker(app: _App, ctx, spec) -> None:
             heartbeat=ctx.heartbeat,
             on_giveup=_make_on_cc_giveup(app),
             on_stale_session=_make_on_cc_stale_session(app),
+            on_resource_event=app.resources.record if app.resources else None,
         ),
     )
     await app.worker.start()

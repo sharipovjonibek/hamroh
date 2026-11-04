@@ -66,6 +66,35 @@ class FakeWorker:
 
 
 @pytest.mark.asyncio
+async def test_message_arriving_during_runtime_recovery_stays_unconsumed(tmp_path):
+    db = await _open(tmp_path)
+    worker = FakeWorker()
+    worker.is_running = False
+
+    async def unavailable(_text):
+        raise RuntimeError("runtime is closing")
+
+    worker.send = unavailable
+    engine = Engine(worker, _CFG, EngineOptions(db=db))
+    message = _msg("keep me through reconnect", 77)
+    await insert_message(db, message)
+    engine._pending = [message]
+    try:
+        assert await engine._kick() is False
+        assert engine.pending_count == 1
+        assert not engine._is_processing.is_set()
+        assert [m.message_id for m in await fetch_unconsumed_inbound(db)] == [77]
+        worker.send = lambda text: FakeWorker.send(worker, text)
+        worker.is_running = True
+        assert await engine._kick() is True
+        assert len(worker.sent) == 1
+        assert await fetch_unconsumed_inbound(db) == []
+    finally:
+        await engine.stop()
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_unconsumed_roundtrip(tmp_path: Path) -> None:
     # Given one inbound and one outbound row
     db = await _open(tmp_path)

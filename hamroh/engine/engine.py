@@ -339,7 +339,7 @@ class Engine(TypingIndicatorMixin):
             return
         await self._kick()
 
-    async def _kick(self) -> None:
+    async def _kick(self) -> bool | None:
         async with self._lock:
             if not self._pending or self._is_processing.is_set():
                 return
@@ -370,8 +370,25 @@ class Engine(TypingIndicatorMixin):
         # Show "typing..." in every chat involved in this batch.
         await self._start_typing(set(self._turn.active_chats))
         self._log_hot_path("worker-send", batch, self._turn.active_chats)
-        await self._worker.send(xml)
+        try:
+            await self._worker.send(xml)
+        except Exception:
+            # A message arriving during runtime close/recovery is still
+            # unconsumed. Keep it queued instead of leaving processing stuck.
+            async with self._lock:
+                self._pending = batch + self._pending
+                self._pending_callbacks = self._turn_callbacks + self._pending_callbacks
+                self._turn_callbacks = []
+                if self._restore_context is None:
+                    self._restore_context = restore
+                self._is_processing.clear()
+                self._turn.active_chats.clear()
+            await self._stop_typing()
+            self._ensure_pending_kick()
+            log.warning("AI runtime unavailable; retaining batch until recovery")
+            return False
         await self._mark_consumed(batch)
+        return True
 
     def _log_hot_path(
         self, stage: str, batch: list[ChatMessage], chats: set[int]
@@ -465,11 +482,12 @@ class Engine(TypingIndicatorMixin):
             worker_ready = bool(getattr(self._worker, "is_running", True))
             if not self._is_processing.is_set() and worker_ready:
                 try:
-                    await self._kick()
+                    accepted = await self._kick()
                 except Exception:
                     log.exception("failed to start requeued AI turn; retrying")
                 else:
-                    return
+                    if accepted is not False:
+                        return
             await asyncio.sleep(0.25)
 
     async def _rearm_typing(self, new_chats: set[int]) -> None:
